@@ -33,7 +33,7 @@ function getContext_() {
   }
   if (!ctx.lexLabel && ctx.lex.forms) ctx.lexLabel = '試算表「' + S.words + '」（' + ctx.lex.entries + ' 筆）';
   ctx.norms = GRAnalyzer.prepareNorms(GR_ASSETS, extraTerms);
-  ctx.phonic = typeof GR_PHONIC !== 'undefined' ? GRAnalyzer.preparePhonic(GR_PHONIC) : null;
+  ctx.phonic = typeof GR_PHONIC !== 'undefined' ? GRAnalyzer.preparePhonic(GR_PHONIC, GR_PY_SYLLABLES) : null;
   GR_CTX_MEMO_ = ctx;
   return ctx;
 }

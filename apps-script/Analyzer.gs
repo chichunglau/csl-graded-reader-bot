@@ -233,39 +233,77 @@ var GRAnalyzer = (function () {
 
   // --------------------------------------------------------------------------- 多音字（ToneOZ IVS）
 
-  /** GR_PHONIC 字串 → { 字: [讀音0, 讀音1, …] } */
-  function preparePhonic(str) {
+  /** GR_PHONIC 字串 → { 字: [讀音0, 讀音1, …] }（讀音存成「無調拼音＋數字調」，例如 le5、xue2）。 */
+  function preparePhonic(str, syllables) {
     var map = dict();
     String(str || '').split('\n').forEach(function (ln) {
       var cs = chars(ln);
-      if (cs.length > 1) map[cs[0]] = cs.slice(1).join('').split(',');
+      if (cs.length > 1) map[cs[0]] = cs.slice(1).join('').split(',').map(function (p) { return pySyl(p); });
     });
+    var syl = dict();
+    String(syllables || '').split(/\s+/).forEach(function (x) { if (x) syl[x] = true; });
+    Object.defineProperty(map, '__syl', { value: syl, enumerable: false });
     return map;
   }
 
-  function normZhuyin(z) {
-    z = String(z || '').trim().replace(/ˉ/g, '').replace(/一/g, 'ㄧ');
-    if (z.length > 1 && z.charAt(z.length - 1) === '˙') z = '˙' + z.slice(0, -1);
-    return z;
+  var TONE = { 'ā': 'a1', 'á': 'a2', 'ǎ': 'a3', 'à': 'a4', 'ē': 'e1', 'é': 'e2', 'ě': 'e3', 'è': 'e4',
+               'ī': 'i1', 'í': 'i2', 'ǐ': 'i3', 'ì': 'i4', 'ō': 'o1', 'ó': 'o2', 'ǒ': 'o3', 'ò': 'o4',
+               'ū': 'u1', 'ú': 'u2', 'ǔ': 'u3', 'ù': 'u4', 'ǖ': 'v1', 'ǘ': 'v2', 'ǚ': 'v3', 'ǜ': 'v4', 'ü': 'v0' };
+
+  /** 帶調號的單一音節 → 「無調拼音＋數字調」：xué → xue2、de → de5。 */
+  function pySyl(p) {
+    var base = '', tone = 5;
+    chars(String(p || '').toLowerCase().normalize('NFC').replace(/u:/g, 'ü')).forEach(function (c) {
+      var m = TONE[c];
+      if (m) { base += m.charAt(0); if (m.charAt(1) !== '0') tone = +m.charAt(1); }
+      else if (/[a-z]/.test(c)) base += c;
+    });
+    return base ? base + tone : '';
+  }
+
+  /** 把整個詞的拼音切成 n 個音節（先依空白、撇號、連字號，再依合法音節表切分連寫）。切不出剛好 n 個時回傳 null。 */
+  function splitPinyin(py, n, syl) {
+    var chunks = String(py || '').toLowerCase().normalize('NFC').replace(/u:/g, 'ü').split(/[\s'’‘\-·]+/).filter(Boolean);
+    var segs = chunks.map(function (ch) {
+      var cs = chars(ch).filter(function (c) { return TONE[c] || /[a-z]/.test(c); });
+      var base = cs.map(function (c) { return TONE[c] ? TONE[c].charAt(0) : c; }).join('');
+      var out = [], memo = dict();
+      (function walk(i, acc) {
+        if (out.length > 8) return;
+        if (i === base.length) { out.push(acc.slice()); return; }
+        for (var L = Math.min(6, base.length - i); L > 0; L--) {
+          if (!syl[base.slice(i, i + L)]) continue;
+          acc.push(cs.slice(i, i + L).join('')); walk(i + L, acc); acc.pop();
+        }
+      })(0, []);
+      return out;
+    });
+    var result = null;
+    (function pick(k, acc) {
+      if (result) return;
+      if (k === segs.length) { if (acc.length === n) result = acc.slice(); return; }
+      segs[k].forEach(function (s) { if (acc.length + s.length <= n) pick(k + 1, acc.concat(s)); });
+    })(0, []);
+    return result;
   }
 
   /**
-   * 依 TBCL 參考注音為詞中的多音字加上 IVS 選擇器。
+   * 依 TBCL 參考漢語拼音為詞中的多音字加上 IVS 選擇器。
    * ToneOZ／注音 IVS 規格：字本身＝預設讀音（第 0 個）；字＋U+E01E0＋i（i ≥ 1）＝第 i 個讀音；
    * 字＋U+E01E0 單獨使用＝不顯示標音，所以預設讀音不加任何選擇器。
-   * 注音以空白分隔音節，音節數必須等於字數；對不上或不需要選音時回傳 null。
+   * 拼音切不出與字數相同的音節數，或不需要選音時回傳 null。
    */
-  function ivsFor(word, zhuyin, phonic) {
-    if (!zhuyin || !phonic) return null;
+  function ivsFor(word, pinyin, phonic) {
+    if (!pinyin || !phonic) return null;
     var cs = chars(word);
-    var syl = String(zhuyin).split(/[\s\u3000]+/).filter(Boolean);
-    if (syl.length !== cs.length) return null;
+    var syl = splitPinyin(String(pinyin).split(/[\/／]/)[0], cs.length, phonic.__syl || dict());
+    if (!syl) return null;
     var out = '', changed = false;
     for (var i = 0; i < cs.length; i++) {
       out += cs[i];
       var list = phonic[cs[i]];
       if (!list) continue;
-      var idx = list.indexOf(normZhuyin(syl[i]));
+      var idx = list.indexOf(pySyl(syl[i]));
       if (idx > 0) { out += String.fromCodePoint(0xE01E0 + idx); changed = true; }
     }
     return changed ? out : null;
@@ -375,7 +413,7 @@ var GRAnalyzer = (function () {
         pushOov();
         if (lexMap[w]) {
           var sp = { t: w, k: 'w', l: lexMap[w].l, gl: !!(glossary[w] || known[w] || proper[w]) };
-          var iv = ctx.phonic ? ivsFor(w, lexMap[w].z, ctx.phonic) : null;
+          var iv = ctx.phonic ? ivsFor(w, lexMap[w].p, ctx.phonic) : null;
           if (iv) sp.iv = iv;                       // ToneOZ 字型用：含多音字選擇器的字串
           spans.push(sp);
         }
@@ -577,6 +615,8 @@ var GRAnalyzer = (function () {
     prepareNorms: prepareNorms,
     preparePhonic: preparePhonic,
     ivsFor: ivsFor,
+    splitPinyin: splitPinyin,
+    pySyl: pySyl,
     analyze: analyze,
     Segmenter: Segmenter,
     isHan: isHan

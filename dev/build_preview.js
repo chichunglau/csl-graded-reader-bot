@@ -38,7 +38,7 @@ ${read('Adjust.gs')}
   var CANNED = ${JSON.stringify(canned)};
   var rows = DEMO_CSV.trim().split('\\n').map(function (l) { return l.split(','); });
   var lex = GRAnalyzer.buildLeveled(rows, 'word');
-  var ctx = { lex: lex, chars: null, grammar: [], proper: [], norms: GRAnalyzer.prepareNorms(GR_ASSETS, []), phonic: GRAnalyzer.preparePhonic(GR_PHONIC),
+  var ctx = { lex: lex, chars: null, grammar: [], proper: [], norms: GRAnalyzer.prepareNorms(GR_ASSETS, []), phonic: GRAnalyzer.preparePhonic(GR_PHONIC, GR_PY_SYLLABLES),
               lexLabel: '示範詞表（' + lex.entries + ' 詞，等級為示意，非國教院 TBCL 資料）' };
   var used = 0;
   function safe(fn) { try { return fn(); } catch (e) { return { ok: false, error: e.message }; } }

@@ -8,7 +8,7 @@
   "font.pinyin": "ToneOZ 繁體＋漢語拼音",
   "font.zhuyin": "ToneOZ 繁體＋注音",
   "font.loading": "正在載入字型，第一次使用可能要等一下…",
-  "font.ready": "已套用「{name}」。詞表內的詞會依 TBCL 參考注音自動選對多音字讀音。",
+  "font.ready": "已套用「{name}」。詞表內的詞會依 TBCL 參考漢語拼音自動選對多音字讀音。",
   "font.missing": "找不到「{name}」字型。請在這台電腦安裝 ToneOZ 字型，或請管理者設定字型網址。",
   "font.download": "下載 ToneOZ 字型",
   "size.s": "小",
