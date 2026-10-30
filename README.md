@@ -46,6 +46,8 @@
 
 ### 1. 建立試算表與 Apps Script 專案
 
+> **快速版**：`dist/` 資料夾是合併好的 4 個檔（`appsscript.json`、`Code.gs`、`Index.html`、`I18n.html`），只要貼這 4 個檔即可取代下面第 4 步的 17 個檔。改了 `apps-script/` 後執行 `node dev/build_dist.js` 重新產生。
+
 1. 在 Google 雲端硬碟新增一份試算表，命名為「分級讀本機器人資料庫」。
 2. 試算表選單「擴充功能 → Apps Script」。
 3. 左側「專案設定」（齒輪）→ 勾選「在編輯器中顯示 appsscript.json 資訊清單檔案」。回到編輯器，把 `appsscript.json` 的內容整份貼上。
