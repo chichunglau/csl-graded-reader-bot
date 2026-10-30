@@ -223,5 +223,7 @@
   "level.choose": "Choose your level",
   "badge": "{code} · TBCL {n}",
   "tocfl.names": "Novice 1,Novice 2,Level 1,Level 2,Level 3,Level 4,Level 5,Level 6",
-  "composer.hint": "Press Ctrl+Enter to send."
+  "composer.hint": "Press Ctrl+Enter to send.",
+  "busy.queue": "Many people are using it. Waiting in line… (retry {n})",
+  "level.novice1": "Novice 1: no words marked 1*"
 }

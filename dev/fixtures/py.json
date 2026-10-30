@@ -1,18 +1,18 @@
 {
   "files": [
-    "sample.txt"
+    "fixtures/sample_body.txt"
   ],
-  "tbcl_file": "demo_lexicon.csv",
+  "tbcl_file": "fixtures/demo_lexicon.csv",
   "target": 3,
-  "han_chars": 131,
-  "tokens": 81,
-  "sentences": 10,
-  "sentence_len_mean": 13.1,
+  "han_chars": 126,
+  "tokens": 78,
+  "sentences": 9,
+  "sentence_len_mean": 14,
   "level_tokens": {
     "1": 46,
     "2": 7,
-    "3": 8,
-    "4": 3,
+    "3": 7,
+    "4": 2,
     "5": 3,
     "6": 2,
     "7": 1
@@ -21,23 +21,21 @@
     "專名／自訂詞": 7
   },
   "oov": {
-    "第一": 1,
     "出租": 1,
     "觉得": 1,
     "开心": 1
   },
-  "coverage_within_target": 0.7530864197530864,
-  "coverage_effective": 0.8395061728395061,
+  "coverage_within_target": 0.7692307692307693,
+  "coverage_effective": 0.8589743589743589,
   "above_unglossed": {
-    "章": 1,
-    "空氣": 1,
-    "美食": 1,
     "擁擠": 1,
     "香味": 1,
     "品嚐": 1,
     "攤販": 1,
     "迫不及待": 1,
-    "琳瑯滿目": 1
+    "琳瑯滿目": 1,
+    "空氣": 1,
+    "美食": 1
   },
   "above_glossed": {},
   "simplified_chars": {

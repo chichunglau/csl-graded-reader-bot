@@ -12,10 +12,12 @@
  *   OPENAI_API_KEY / OPENAI_MODEL / OPENAI_BASE_URL     預留
  *   GEMINI_API_KEY / GEMINI_MODEL                        預留
  *   CUSTOM_LLM_URL / CUSTOM_LLM_TOKEN                    預留：學校自建或代理端點
- *   LLM_MAX_TOKENS        單次輸出上限，預設 8000
+ *   LLM_MAX_TOKENS        每段輸出上限，預設 4000
+ *   SEGMENT_CHARS         每段漢字數，預設 600。Apps Script 單一外部請求約 60 秒就會中斷，
+ *                         長文因此切段平行送出；若仍出現逾時，調小此值或改用 claude-haiku-5-5
  *   MAX_ROUNDS            改寫＋驗證最多幾輪，預設 2
  *   MAX_CHARS             單次調整的漢字上限，預設 3000（長篇讀本請分章）
- *   DAILY_LIMIT           每日 LLM 呼叫上限（全站合計），預設 200
+ *   DAILY_LIMIT           每日 LLM 呼叫上限（全站合計，每段算一次），預設 300
  *   API_TOKEN             對外 API（doPost）權杖；setupProject 會自動產生
  *   UI_DEFAULT_LANG       介面預設語言（zh-Hant、en、ja、ko、vi、id、th、fil、ms、my、km、lo、hi、ne、bn、si）；
  *                         留空＝依瀏覽器語言自動判斷。網址加 ?lang=vi 可指定，方便 Google Sites 各語言頁面分開嵌入。
@@ -23,7 +25,7 @@
  *   TONEOZ_ZHUYIN_URL     ToneOZ 注音庫楷-繁 的網頁字型網址；預設為官方 GitHub 專案經 jsDelivr 提供的 WOFF（約 16 MB）
  */
 var GR_CONFIG = {
-  version: '1.3.0',
+  version: '1.4.0',
   sheets: {
     guide: '說明',
     words: 'TBCL詞語',
@@ -39,10 +41,11 @@ var GR_CONFIG = {
     ANTHROPIC_MODEL: 'claude-sonnet-5-5',
     ANTHROPIC_VERSION: '2026-10-21',     // 此版本已移除 temperature／top_p／top_k，請勿加入這些參數
     OPENAI_BASE_URL: 'https://api.openai.com/v1',
-    LLM_MAX_TOKENS: 8000,
+    LLM_MAX_TOKENS: 4000,
+    SEGMENT_CHARS: 600,
     MAX_ROUNDS: 2,
     MAX_CHARS: 3000,
-    DAILY_LIMIT: 200,
+    DAILY_LIMIT: 300,
     ANALYZE_MAX_CHARS: 60000,
     UI_DEFAULT_LANG: '',
     TONEOZ_PINYIN_URL: '',

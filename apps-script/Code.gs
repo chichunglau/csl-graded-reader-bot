@@ -7,7 +7,11 @@
 
 function doGet(e) {
   var p = (e && e.parameter) || {};
-  if (p.action === 'health') return jsonOut_(statusInfo_());
+  if (p.action === 'health') {
+    // 狀態資訊含模型與用量，需要 API 權杖；沒有權杖只回報服務正常
+    var token = prop_('API_TOKEN', '');
+    return jsonOut_(token && p.token === token ? { ok: true, status: statusInfo_() } : { ok: true });
+  }
   var t = HtmlService.createTemplateFromFile('Index');
   t.prefsJson = JSON.stringify(urlPrefs_(p)).replace(/</g, '\\u003c');
   return t.evaluate()
@@ -29,13 +33,16 @@ function urlPrefs_(p) {
   if (['std', 'pinyin', 'zhuyin'].indexOf(p.font) >= 0) out.font = p.font;
   if (['s', 'm', 'l'].indexOf(p.size) >= 0) out.size = p.size;
   if (/^[1-7]$/.test(p.level || '')) out.level = parseInt(p.level, 10);
+  var stop = grParseTocfl(p.tocfl);
+  if (stop >= 0) out.tocfl = stop;
+  if (['light', 'dark', 'auto'].indexOf(p.theme) >= 0) out.theme = p.theme;
   return out;
 }
 
 function uiBootstrap() {
   return safeRun_(function () {
     return {
-      ok: true, levels: GR_LEVELS, purposes: GR_PURPOSES, learners: GR_LEARNERS, status: statusInfo_(),
+      ok: true, levels: GR_LEVELS, tocfl: GR_TOCFL, purposes: GR_PURPOSES, learners: GR_LEARNERS, status: statusInfo_(),
       ui: {
         defaultLang: prop_('UI_DEFAULT_LANG'),
         fonts: { pinyinUrl: safeFontUrl_(prop_('TONEOZ_PINYIN_URL')), zhuyinUrl: safeFontUrl_(prop_('TONEOZ_ZHUYIN_URL')) },
@@ -72,10 +79,11 @@ function runAdjust_(req, source) {
   var st = llmStatus_();
   if (!st.configured) throw new Error('目前只能分析，尚未設定 LLM：' + st.hint);
   var res = runAdjustCore_(req, getContext_(), {
-    callLlm: callLlmJson_,
+    callLlmBatch: callLlmBatch_,
     consumeQuota: consumeQuota_,
     maxRounds: propInt_('MAX_ROUNDS'),
-    maxChars: propInt_('MAX_CHARS')
+    maxChars: propInt_('MAX_CHARS'),
+    segmentChars: propInt_('SEGMENT_CHARS')
   });
   appendLog_(source, 'adjust', normalizeRequest_(req), res, Date.now() - t0);
   return res;
@@ -92,7 +100,7 @@ function statusInfo_() {
     proper: ctx.proper.length,
     llm: { provider: llm.provider, model: llm.model, configured: llm.configured, hint: llm.hint },
     quota: quotaStatus_(),
-    limits: { maxChars: propInt_('MAX_CHARS'), maxRounds: propInt_('MAX_ROUNDS') }
+    limits: { maxChars: propInt_('MAX_CHARS'), maxRounds: propInt_('MAX_ROUNDS'), segmentChars: propInt_('SEGMENT_CHARS') }
   };
 }
 

@@ -63,3 +63,37 @@ function grLevelLabel(level) {
   if (!L) return '—';
   return 'TBCL 第 ' + L.level + ' 級（' + L.band + '）｜TOCFL ' + L.tocfl + '（' + L.tocflEn + '，CEFR ' + L.cefr + '）';
 }
+
+/**
+ * TOCFL 四等八級（華測會現行架構）。tbcl＝整體對應的 TBCL 等級。
+ * 準備一級與準備二級都對應 TBCL 第 1 級；本工具以 TBCL 第 1 級詞表的子級區分：
+ *   準備一級只用標示「第1級」的詞，標示「第1*級」的詞（第 1 級後段）視為超綱，句長也更短；
+ *   準備二級可用整個第 1 級。此區分是本工具的編修慣例，不是華測會或國教院公布的對應。
+ */
+var GR_TOCFL = [
+  { stop: 0, code: 'Novice 1', name: '準備一級', bandName: '準備級', cefr: 'Pre-A1', tbcl: 1, strictStar: true, sentLenGuide: 6 },
+  { stop: 1, code: 'Novice 2', name: '準備二級', bandName: '準備級', cefr: 'Pre-A1', tbcl: 1, strictStar: false, sentLenGuide: 8 },
+  { stop: 2, code: 'A1', name: '入門級', bandName: '入門基礎級', cefr: 'A1', tbcl: 2, en: 'Level 1' },
+  { stop: 3, code: 'A2', name: '基礎級', bandName: '入門基礎級', cefr: 'A2', tbcl: 3, en: 'Level 2' },
+  { stop: 4, code: 'B1', name: '進階級', bandName: '進階高階級', cefr: 'B1', tbcl: 4, en: 'Level 3' },
+  { stop: 5, code: 'B2', name: '高階級', bandName: '進階高階級', cefr: 'B2', tbcl: 5, en: 'Level 4' },
+  { stop: 6, code: 'C1', name: '流利級', bandName: '流利精通級', cefr: 'C1', tbcl: 6, en: 'Level 5' },
+  { stop: 7, code: 'C2', name: '精通級', bandName: '流利精通級', cefr: 'C2', tbcl: 7, en: 'Level 6' }
+];
+
+/** 接受 0–7、'N1'、'Novice 1'、'A2'… → 0–7；認不出回傳 -1。 */
+function grParseTocfl(v) {
+  if (v === null || v === undefined || v === '') return -1;
+  if (typeof v === 'number' || /^\d$/.test(String(v))) { var n = parseInt(v, 10); return n >= 0 && n <= 7 ? n : -1; }
+  var s = String(v).replace(/\s+/g, '').toUpperCase().replace('NOVICE', 'N');
+  return ['N1', 'N2', 'A1', 'A2', 'B1', 'B2', 'C1', 'C2'].indexOf(s);
+}
+
+/** 只給 TBCL 等級時的預設 TOCFL 級：第 1 級 → 準備二級，其餘一對一。 */
+function grStopOfTbcl(level) { return level <= 1 ? 1 : Math.min(7, level); }
+
+/** 「TBCL 第 1 級（基礎）｜TOCFL 準備一級（Novice 1，Pre-A1）」 */
+function grTargetLabel(stop) {
+  var T = GR_TOCFL[stop], L = grLevelInfo(T.tbcl);
+  return 'TBCL 第 ' + L.level + ' 級（' + L.band + (T.strictStar ? '，不含 1* 詞' : '') + '）｜TOCFL ' + T.name + '（' + T.code + '，CEFR ' + T.cefr + '）';
+}

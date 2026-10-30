@@ -223,5 +223,7 @@
   "level.choose": "स्तर चुनें",
   "badge": "{code} · TBCL {n}",
   "tocfl.names": "Novice 1,Novice 2,Level 1,Level 2,Level 3,Level 4,Level 5,Level 6",
-  "composer.hint": "भेजने के लिए Ctrl+Enter दबाएँ।"
+  "composer.hint": "भेजने के लिए Ctrl+Enter दबाएँ।",
+  "busy.queue": "उपयोगकर्ता अधिक हैं, कतार में… ({n}वाँ पुनः प्रयास)",
+  "level.novice1": "Novice 1: 1* चिह्नित शब्द नहीं"
 }

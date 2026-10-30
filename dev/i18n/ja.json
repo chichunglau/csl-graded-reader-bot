@@ -223,5 +223,7 @@
   "level.choose": "目標レベルを選ぶ",
   "badge": "{code} {name}（TBCL {n}）",
   "tocfl.names": "準備一級,準備二級,入門級,基礎級,進階級,高階級,流利級,精通級",
-  "composer.hint": "Ctrl＋Enter で送信します。"
+  "composer.hint": "Ctrl＋Enter で送信します。",
+  "busy.queue": "利用者が多いため順番待ちです…（{n} 回目の再試行）",
+  "level.novice1": "準備一級：1* の語は使いません"
 }

@@ -2,6 +2,8 @@
 
 部署好的網頁應用程式網址（結尾 `/exec`）同時是 JSON API。用途：課程平臺批次檢核、LINE Bot、看板讀取、整本書分章處理。
 
+> **要另外建一個部署**：其他系統用程式呼叫時不會登入 Google。給 Google Sites 用的部署若設成「只限網域」或「需登入」，API 只會拿到登入頁。請另建一個部署：執行身分「我」、誰可以存取「所有人」，只把這個網址給要串接的系統（見 README 第 4 步「部署 B」）。
+
 ## 驗證
 
 每個請求帶 `token`，值為指令碼屬性 `API_TOKEN`（`setupProject` 會自動產生；試算表選單「顯示對外 API 權杖」可查看）。權杖錯誤回 `{ "ok": false, "error": "unauthorized…" }`。
@@ -20,7 +22,8 @@ Apps Script 會先回 302 轉址再給結果，用戶端要**跟隨轉址**（cu
 | `token` | string | 必填 |
 | `action` | string | `analyze`（只分析，不呼叫 AI）、`adjust`（分析＋改寫＋驗證）、`levels`（等級對照表）、`health`（詞表與 AI 狀態） |
 | `text` | string | 文本（`analyze`、`adjust` 必填） |
-| `target` | number | TBCL 目標級 1–7，預設 3 |
+| `tocfl` | string／number | TOCFL 目標級：`N1`、`N2`、`A1`、`A2`、`B1`、`B2`、`C1`、`C2`，或 0–7。優先於 `target` |
+| `target` | number | 只用 TBCL 指定時的目標級 1–7，預設 3；第 1 級視為準備二級 |
 | `mode` | string | `auto`（預設）、`down`、`up`、`localize` |
 | `purpose` | string | `extensive`（分級讀本，門檻 98%，預設）、`intensive`（精讀，95%） |
 | `learner` | string | `adult_nonchar`（預設）、`adult_char`、`overseas`、`child` |
@@ -40,7 +43,10 @@ Apps Script 會先回 302 轉址再給結果，用戶端要**跟隨轉址**（cu
 {
   "ok": true,
   "action": "adjust",
-  "target": 3,
+  "tocfl": 3,                          // 0–7：Novice 1 … C2
+  "target": 3,                         // 對應的 TBCL 等級
+  "levelLabel": "TBCL 第 3 級（基礎）｜TOCFL 基礎級（A2，CEFR A2）",
+  "segments": 1,                       // 分成幾段平行改寫
   "levelLabel": "TBCL 第 3 級（基礎）｜TOCFL 基礎級（Level 2，CEFR A2）",
   "direction": "down",                 // down｜up｜polish
   "rounds": 2,
@@ -81,7 +87,7 @@ Apps Script 會先回 302 轉址再給結果，用戶端要**跟隨轉址**（cu
 ```bash
 curl -sL "https://script.google.com/macros/s/<部署 ID>/exec" \
   -H "Content-Type: text/plain;charset=utf-8" \
-  --data '{"token":"<API_TOKEN>","action":"analyze","target":3,"text":"安娜是從法國來的學生。","protectedWords":"安娜"}'
+  --data '{"token":"<API_TOKEN>","action":"analyze","tocfl":"A2","text":"安娜是從法國來的學生。","protectedWords":"安娜"}'
 ```
 
 **Python（整本書分章檢核）**
@@ -103,7 +109,7 @@ for i, chapter in enumerate(open("讀本.txt", encoding="utf-8").read().split("\
 const res = await fetch(URL, {
   method: 'POST',
   headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-  body: JSON.stringify({ token: TOKEN, action: 'adjust', target: 2, text })
+  body: JSON.stringify({ token: TOKEN, action: 'adjust', tocfl: 'A1', text })
 }).then(r => r.json());
 ```
 
@@ -111,6 +117,8 @@ const res = await fetch(URL, {
 
 ## 限制
 
-- 單次執行上限 6 分鐘（Apps Script 限制）；`adjust` 一章約 20–60 秒。
-- `adjust` 受 `MAX_CHARS`（預設 3,000 字）與 `DAILY_LIMIT`（預設每日 200 次 AI 呼叫，全站合計）限制。
+- 單次執行上限 6 分鐘（Apps Script 限制）；`adjust` 一章約 20–60 秒。長文會切成約 600 字一段同時送出，避開單一外部請求約 60 秒的上限。
+- `adjust` 受 `MAX_CHARS`（預設 3,000 字）與 `DAILY_LIMIT`（預設每日 300 次 AI 呼叫，全站合計，每段算一次）限制。
+- 部分段落失敗時仍回 `ok: true`，失敗段保留原文，並在 `warnings` 說明。
+- `GET …/exec?action=health` 不帶權杖只回 `{ "ok": true }`；加上 `&token=<API_TOKEN>` 才回詞表、模型與用量。
 - Apps Script 網頁應用程式有每日執行次數配額，大量批次處理請分散時間。

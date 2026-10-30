@@ -41,7 +41,7 @@ assert.strictEqual(ctx2.proper.length, 4);
   ? toolResp(REV1, [{ original: '攤販賣的東西琳瑯滿目', revised: '很多人在賣東西', category: '詞彙', reason: '攤販 6 級、琳瑯滿目 7 級' },
                     { original: '出租車', revised: '計程車', category: '用語', reason: '臺灣說計程車' }])
   : toolResp(REV2, [{ original: '非常擁擠', revised: '人非常多', category: '詞彙', reason: '擁擠 5 級' }])));
-r = g.uiAdjust({ text: sample, target: 3, purpose: 'intensive' });
+r = g.uiAdjust({ text: sample, target: 3, purpose: 'intensive', glossary: '章' });
 assert.ok(r.ok, r.error);
 const f1 = m.log.fetches[0];
 assert.strictEqual(f1.url, 'https://api.anthropic.com/v1/messages');
@@ -56,7 +56,7 @@ assert.ok(f1.body.messages[0].content.includes('【不得更動的詞】'));
 assert.strictEqual(m.log.fetches.length, 2, 'two rounds');
 assert.ok(m.log.fetches[1].body.messages[0].content.includes('擁擠（5）'), 'round 2 feedback names 擁擠');
 assert.strictEqual(r.rounds, 2); assert.strictEqual(r.passed, true, r.issues);
-assert.strictEqual(r.revisedText, REV2.trim());
+assert.strictEqual(r.revisedText.trim(), REV2.trim()); assert.ok(r.revisedText.endsWith('\n'), 'keeps trailing newline');
 assert.strictEqual(r.changes.length, 3);
 assert.strictEqual(r.llm.inputTokens, 3000);
 assert.strictEqual(m.store.quota_20261022, '2');
@@ -67,7 +67,7 @@ fs.writeFileSync(__dirname + '/out_report.md', r.report);
 
 // 3) 合級文本不呼叫 LLM
 ({ g, m } = setup(() => { throw new Error('should not call'); }));
-r = g.uiAdjust({ text: REV2, target: 3, purpose: 'intensive' });
+r = g.uiAdjust({ text: REV2, target: 3, purpose: 'intensive', glossary: '章' });
 assert.ok(r.ok, r.error); assert.strictEqual(r.rounds, 0);
 console.log('skip-LLM OK —', r.summary);
 

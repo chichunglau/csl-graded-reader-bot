@@ -223,5 +223,7 @@
   "level.choose": "මට්ටම තෝරන්න",
   "badge": "{code} · TBCL {n}",
   "tocfl.names": "Novice 1,Novice 2,Level 1,Level 2,Level 3,Level 4,Level 5,Level 6",
-  "composer.hint": "යැවීමට Ctrl+Enter ඔබන්න."
+  "composer.hint": "යැවීමට Ctrl+Enter ඔබන්න.",
+  "busy.queue": "භාවිත කරන්නන් වැඩියි, පෝලිමේ රැඳී සිටී… ({n} වන වාරය)",
+  "level.novice1": "Novice 1: 1* සලකුණු කළ වචන නොමැතිව"
 }

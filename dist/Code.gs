@@ -1,5 +1,5 @@
 /**
- * 分級讀本調級機器人 v1.3.0（合併版，由 dev/build_dist.js 產生）
+ * 分級讀本調級機器人 v1.4.0（合併版，由 dev/build_dist.js 產生）
  * 貼進 Apps Script 的「程式碼.gs」。另需 Index.html、I18n.html 與 appsscript.json。
  * 各段原始檔見 GitHub 專案的 apps-script/ 資料夾。
  */
@@ -19,10 +19,12 @@
  *   OPENAI_API_KEY / OPENAI_MODEL / OPENAI_BASE_URL     預留
  *   GEMINI_API_KEY / GEMINI_MODEL                        預留
  *   CUSTOM_LLM_URL / CUSTOM_LLM_TOKEN                    預留：學校自建或代理端點
- *   LLM_MAX_TOKENS        單次輸出上限，預設 8000
+ *   LLM_MAX_TOKENS        每段輸出上限，預設 4000
+ *   SEGMENT_CHARS         每段漢字數，預設 600。Apps Script 單一外部請求約 60 秒就會中斷，
+ *                         長文因此切段平行送出；若仍出現逾時，調小此值或改用 claude-haiku-5-5
  *   MAX_ROUNDS            改寫＋驗證最多幾輪，預設 2
  *   MAX_CHARS             單次調整的漢字上限，預設 3000（長篇讀本請分章）
- *   DAILY_LIMIT           每日 LLM 呼叫上限（全站合計），預設 200
+ *   DAILY_LIMIT           每日 LLM 呼叫上限（全站合計，每段算一次），預設 300
  *   API_TOKEN             對外 API（doPost）權杖；setupProject 會自動產生
  *   UI_DEFAULT_LANG       介面預設語言（zh-Hant、en、ja、ko、vi、id、th、fil、ms、my、km、lo、hi、ne、bn、si）；
  *                         留空＝依瀏覽器語言自動判斷。網址加 ?lang=vi 可指定，方便 Google Sites 各語言頁面分開嵌入。
@@ -30,7 +32,7 @@
  *   TONEOZ_ZHUYIN_URL     ToneOZ 注音庫楷-繁 的網頁字型網址；預設為官方 GitHub 專案經 jsDelivr 提供的 WOFF（約 16 MB）
  */
 var GR_CONFIG = {
-  version: '1.3.0',
+  version: '1.4.0',
   sheets: {
     guide: '說明',
     words: 'TBCL詞語',
@@ -46,10 +48,11 @@ var GR_CONFIG = {
     ANTHROPIC_MODEL: 'claude-sonnet-5-5',
     ANTHROPIC_VERSION: '2026-10-21',     // 此版本已移除 temperature／top_p／top_k，請勿加入這些參數
     OPENAI_BASE_URL: 'https://api.openai.com/v1',
-    LLM_MAX_TOKENS: 8000,
+    LLM_MAX_TOKENS: 4000,
+    SEGMENT_CHARS: 600,
     MAX_ROUNDS: 2,
     MAX_CHARS: 3000,
-    DAILY_LIMIT: 200,
+    DAILY_LIMIT: 300,
     ANALYZE_MAX_CHARS: 60000,
     UI_DEFAULT_LANG: '',
     TONEOZ_PINYIN_URL: '',
@@ -138,6 +141,40 @@ function grLevelLabel(level) {
   var L = grLevelInfo(level);
   if (!L) return '—';
   return 'TBCL 第 ' + L.level + ' 級（' + L.band + '）｜TOCFL ' + L.tocfl + '（' + L.tocflEn + '，CEFR ' + L.cefr + '）';
+}
+
+/**
+ * TOCFL 四等八級（華測會現行架構）。tbcl＝整體對應的 TBCL 等級。
+ * 準備一級與準備二級都對應 TBCL 第 1 級；本工具以 TBCL 第 1 級詞表的子級區分：
+ *   準備一級只用標示「第1級」的詞，標示「第1*級」的詞（第 1 級後段）視為超綱，句長也更短；
+ *   準備二級可用整個第 1 級。此區分是本工具的編修慣例，不是華測會或國教院公布的對應。
+ */
+var GR_TOCFL = [
+  { stop: 0, code: 'Novice 1', name: '準備一級', bandName: '準備級', cefr: 'Pre-A1', tbcl: 1, strictStar: true, sentLenGuide: 6 },
+  { stop: 1, code: 'Novice 2', name: '準備二級', bandName: '準備級', cefr: 'Pre-A1', tbcl: 1, strictStar: false, sentLenGuide: 8 },
+  { stop: 2, code: 'A1', name: '入門級', bandName: '入門基礎級', cefr: 'A1', tbcl: 2, en: 'Level 1' },
+  { stop: 3, code: 'A2', name: '基礎級', bandName: '入門基礎級', cefr: 'A2', tbcl: 3, en: 'Level 2' },
+  { stop: 4, code: 'B1', name: '進階級', bandName: '進階高階級', cefr: 'B1', tbcl: 4, en: 'Level 3' },
+  { stop: 5, code: 'B2', name: '高階級', bandName: '進階高階級', cefr: 'B2', tbcl: 5, en: 'Level 4' },
+  { stop: 6, code: 'C1', name: '流利級', bandName: '流利精通級', cefr: 'C1', tbcl: 6, en: 'Level 5' },
+  { stop: 7, code: 'C2', name: '精通級', bandName: '流利精通級', cefr: 'C2', tbcl: 7, en: 'Level 6' }
+];
+
+/** 接受 0–7、'N1'、'Novice 1'、'A2'… → 0–7；認不出回傳 -1。 */
+function grParseTocfl(v) {
+  if (v === null || v === undefined || v === '') return -1;
+  if (typeof v === 'number' || /^\d$/.test(String(v))) { var n = parseInt(v, 10); return n >= 0 && n <= 7 ? n : -1; }
+  var s = String(v).replace(/\s+/g, '').toUpperCase().replace('NOVICE', 'N');
+  return ['N1', 'N2', 'A1', 'A2', 'B1', 'B2', 'C1', 'C2'].indexOf(s);
+}
+
+/** 只給 TBCL 等級時的預設 TOCFL 級：第 1 級 → 準備二級，其餘一對一。 */
+function grStopOfTbcl(level) { return level <= 1 ? 1 : Math.min(7, level); }
+
+/** 「TBCL 第 1 級（基礎）｜TOCFL 準備一級（Novice 1，Pre-A1）」 */
+function grTargetLabel(stop) {
+  var T = GR_TOCFL[stop], L = grLevelInfo(T.tbcl);
+  return 'TBCL 第 ' + L.level + ' 級（' + L.band + (T.strictStar ? '，不含 1* 詞' : '') + '）｜TOCFL ' + T.name + '（' + T.code + '，CEFR ' + T.cefr + '）';
 }
 
 
@@ -277,6 +314,7 @@ var GRAnalyzer = (function () {
     for (var r = start; r < rows.length; r++) {
       var row = rows[r];
       var lvl = parseLevel(row[li]);
+      var star = /[*＊]/.test(String(row[li] || '')) ? 1 : 0;   // 「第1*級」＝該級後段
       if (lvl === null || lvl > 7) continue;
       res.entries++;
       var forms = kind === 'char' ? chars(String(row[wi] || '').trim()).filter(isHan) : expandEntry(row[wi]);
@@ -290,7 +328,7 @@ var GRAnalyzer = (function () {
         var p = pys.length === parts.length && idx >= 0 ? pys[idx] : pys.join('/');
         var z = zys.length === parts.length && idx >= 0 ? zys[idx] : zys.join('/');
         var old = map[f];
-        if (!old || lvl < old.l) map[f] = { l: lvl, p: String(p || '').trim(), z: String(z || '').trim() };
+        if (!old || lvl < old.l || (lvl === old.l && old.s && !star)) map[f] = { l: lvl, s: star, p: String(p || '').trim(), z: String(z || '').trim() };
       });
     }
     var keys = Object.keys(map);
@@ -304,7 +342,7 @@ var GRAnalyzer = (function () {
     var lines = [lx.entries + '\t' + lx.maxLen];
     Object.keys(lx.map).forEach(function (w) {
       var v = lx.map[w];
-      lines.push(w + '\t' + v.l + '\t' + (v.p || '') + '\t' + (v.z || ''));
+      lines.push(w + '\t' + v.l + '\t' + (v.p || '') + '\t' + (v.z || '') + '\t' + (v.s ? 1 : 0));
     });
     return lines.join('\n');
   }
@@ -318,7 +356,7 @@ var GRAnalyzer = (function () {
     res.maxLen = parseInt(head[1], 10) || 1;
     for (var i = 1; i < lines.length; i++) {
       var c = lines[i].split('\t');
-      if (c[0]) res.map[c[0]] = { l: parseInt(c[1], 10), p: c[2] || '', z: c[3] || '' };
+      if (c[0]) res.map[c[0]] = { l: parseInt(c[1], 10), p: c[2] || '', z: c[3] || '', s: c[4] === '1' ? 1 : 0 };
     }
     res.forms = Object.keys(res.map).length;
     return res;
@@ -534,12 +572,12 @@ var GRAnalyzer = (function () {
    * analyze(text, ctx, opts)
    *  ctx  = { lex, chars, norms, phonic, lexLabel }（lex/chars 為 buildLeveled 結果，norms 為 prepareNorms 結果，phonic 為 preparePhonic 結果，可省略）
    *  opts = { target, purpose('extensive'|'intensive'), threshold, glossary, known, proper,
-   *           stripSpeakers(預設 true), sentLenGuide, top(預設 60), withSpans(預設 true) }
+   *           stripSpeakers(預設 true), sentLenGuide, strictStar（準備一級：1* 詞視為超綱）, top(預設 60), withSpans(預設 true) }
    */
   function analyze(text, ctx, opts) {
     opts = opts || {};
     ctx = ctx || {};
-    text = String(text || '').replace(/\r\n?/g, '\n');
+    text = stripSelectors(String(text || '')).replace(/\r\n?/g, '\n');
     var lexMap = ctx.lex && ctx.lex.map ? ctx.lex.map : dict();
     var lexLoaded = !!(ctx.lex && ctx.lex.forms > 0);
     var top = opts.top || 60;
@@ -556,11 +594,12 @@ var GRAnalyzer = (function () {
     // ---- 逐行切出 spans：w=TBCL 詞、g=生詞、k=已學詞、p=專名／保留、n=數詞、o=未收錄、x=非漢字、s=說話者標籤
     var spans = [];
     var body = [];          // 去除說話者標籤後的文本（計算句長、用語）
+    var speakers = opts.stripSpeakers !== false ? speakerNames(text) : dict();
     text.split('\n').forEach(function (line, li) {
       if (li > 0) { spans.push({ t: '\n', k: 'x' }); body.push('\n'); }
       if (opts.stripSpeakers !== false) {
         var m = SPEAKER_RE.exec(line);
-        if (m && line.charAt(m[0].length) !== '「' && m[0].length < line.length) {
+        if (m && speakers[labelName(m[0])] && line.charAt(m[0].length) !== '「' && m[0].length < line.length) {
           spans.push({ t: m[0], k: 's' });
           line = line.slice(m[0].length);
         }
@@ -590,8 +629,14 @@ var GRAnalyzer = (function () {
       seg.cut(run).forEach(function (w) {
         if (!has(w)) { oov += w; return; }
         pushOov();
+        var prev = spans[spans.length - 1];
+        if (prev && prev.k === 'n' && /^第/.test(prev.t) && /^[章節回課篇部集冊卷]$/.test(w)) {
+          prev.t += w;                              // 「第一章」「第三課」是章節編號，不檢查等級
+          return;
+        }
         if (lexMap[w]) {
           var sp = { t: w, k: 'w', l: lexMap[w].l, gl: !!(glossary[w] || known[w] || proper[w]) };
+          if (lexMap[w].s) sp.st = 1;
           var iv = ctx.phonic ? ivsFor(w, lexMap[w].p, ctx.phonic) : null;
           if (iv) sp.iv = iv;                       // ToneOZ 字型用：含多音字選擇器的字串
           spans.push(sp);
@@ -674,14 +719,16 @@ var GRAnalyzer = (function () {
 
     // ---- 目標等級檢核
     if (target) {
+      var strictStar = !!opts.strictStar && target === 1;
+      var isAbove = function (s) { return s.k === 'w' && (s.l > target || (strictStar && s.l === 1 && !!s.st)); };
       var within = 0;
-      for (lv = 1; lv <= target; lv++) within += byLv[lv];
       var above = dict();
       toks.forEach(function (s) {
-        if (s.k === 'w' && s.l > target) {
-          if (!above[s.t]) above[s.t] = { w: s.t, lv: s.l, n: 0, glossed: s.gl };
-          above[s.t].n++;
-        }
+        if (s.k !== 'w') return;
+        if (!isAbove(s)) { within++; return; }
+        s.ab = 1;                                   // 前端依此標朱筆
+        if (!above[s.t]) above[s.t] = { w: s.t, lv: s.l, lvl: s.l > target ? String(s.l) : s.l + '*', n: 0, glossed: s.gl };
+        above[s.t].n++;
       });
       var aboveList = Object.keys(above).map(function (w) {
         var a = above[w], e = lexMap[w] || {};
@@ -694,8 +741,10 @@ var GRAnalyzer = (function () {
       var effective = nTok ? (within + support + glossedTok) / nTok : 0;
       var status = estimate.level === null ? (estimate.beyond ? '偏難' : '無法判定')
                  : estimate.level > target ? '偏難' : estimate.level < target ? '偏易' : '合級';
+      if (strictStar && status !== '偏難' && unglossed.length && effective < threshold) status = '偏難';
       result.target = {
         level: target,
+        strictStar: strictStar,
         withinPct: nTok ? round1(within / nTok) : 0,
         effectivePct: round1(effective),
         threshold: round1(threshold),
@@ -762,6 +811,24 @@ var GRAnalyzer = (function () {
 
   // --------------------------------------------------------------------------- 工具
 
+  /** 移除 IVS／變體選擇器（從 ToneOZ 選音編輯器貼上的文字會帶有這些看不見的字元）。 */
+  function stripSelectors(s) { return s.replace(/[\u{E0100}-\u{E01EF}\uFE00-\uFE0F]/gu, ''); }
+
+  function labelName(label) { return label.replace(/[ \t\u3000：:]/g, ''); }
+
+  /** 說話者標籤：同一個名字在行首出現兩次以上，且不是「第一章」「老師說」這類敘述，才當成說話者。 */
+  function speakerNames(text) {
+    var cnt = dict(), ok = dict();
+    text.split('\n').forEach(function (line) {
+      var m = SPEAKER_RE.exec(line);
+      if (m) { var n = labelName(m[0]); cnt[n] = (cnt[n] || 0) + 1; }
+    });
+    Object.keys(cnt).forEach(function (n) {
+      if (cnt[n] >= 2 && !/^第.+[章節回課部篇]$|[說道問答講]$|^(注意|提示|說明|例如|答案|問題|題目|備註|附註|範例)$/.test(n)) ok[n] = true;
+    });
+    return ok;
+  }
+
   function setOf(arr) { var s = dict(); arr.forEach(function (w) { s[w] = true; }); return s; }
   function maxLenOf(s) { return Object.keys(s).reduce(function (m, w) { return Math.max(m, chars(w).length); }, 1); }
   function sum(a, b) { return a + b; }
@@ -797,6 +864,7 @@ var GRAnalyzer = (function () {
     splitPinyin: splitPinyin,
     pySyl: pySyl,
     analyze: analyze,
+    stripSelectors: stripSelectors,
     Segmenter: Segmenter,
     isHan: isHan
   };
@@ -924,7 +992,7 @@ function builtinI18n_() {
 
 // ----------------------------------------------------------------------------- 大型快取
 
-function cacheKey_(kind) { return 'gr' + prop_('CACHE_VER', '1') + ':' + kind; }
+function cacheKey_(kind) { return 'gr2.' + prop_('CACHE_VER', '1') + ':' + kind; }   // gr2：詞表快取格式含 1* 子級
 
 /** 分塊寫入快取：每塊 30,000 個 UTF-16 單位，UTF-8 最多約 90KB，低於單值 100KB 上限。 */
 function cachePutBig_(key, str) {
@@ -969,8 +1037,9 @@ function clearLexiconCache() {
 
 // ----------------------------------------------------------------------------- 每日配額
 
-/** 每呼叫一次 LLM 扣一次；超過 DAILY_LIMIT 就擋下，避免網頁被濫用而產生費用。 */
-function consumeQuota_() {
+/** 一次預留 n 次 LLM 呼叫（每段一次）；不夠就整批擋下，避免做到一半。 */
+function consumeQuota_(n) {
+  n = Math.max(1, n || 1);
   var limit = propInt_('DAILY_LIMIT');
   var key = 'quota_' + Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyyMMdd');
   var lock = LockService.getScriptLock();
@@ -978,12 +1047,12 @@ function consumeQuota_() {
   try {
     var props = PropertiesService.getScriptProperties();
     var used = parseInt(props.getProperty(key) || '0', 10);
-    if (used >= limit) throw new Error('今日 LLM 呼叫次數已達上限（' + limit + ' 次），請明天再試，或請管理者調高 DAILY_LIMIT。');
+    if (used + n > limit) throw new Error('今日 AI 呼叫次數剩 ' + Math.max(0, limit - used) + ' 次，這次需要 ' + n + ' 次（上限 ' + limit + ' 次），請明天再試，或請管理者調高 DAILY_LIMIT。');
     if (used === 0) {
       props.getKeys().forEach(function (k) { if (k.indexOf('quota_') === 0 && k !== key) props.deleteProperty(k); });
     }
-    props.setProperty(key, String(used + 1));
-    return { used: used + 1, limit: limit };
+    props.setProperty(key, String(used + n));
+    return { used: used + n, limit: limit };
   } finally {
     lock.releaseLock();
   }
@@ -1005,12 +1074,12 @@ function appendLog_(source, action, req, res, ms) {
     var user = '';
     try { user = Session.getActiveUser().getEmail(); } catch (e) {}
     sh.appendRow([
-      new Date(), source, action, req.target || '', res.direction || '', req.purpose || '',
+      new Date(), source, action, (GR_TOCFL[req.stop] ? GR_TOCFL[req.stop].code + '／' : '') + (req.target || ''), res.direction || '', req.purpose || '',
       b.stats ? b.stats.hanChars : '',
       b.estimate ? (b.estimate.level || (b.estimate.beyond ? '>7' : '')) : '',
       a.estimate ? (a.estimate.level || (a.estimate.beyond ? '>7' : '')) : '',
       b.target ? b.target.effectivePct : '', a.target ? a.target.effectivePct : '',
-      res.rounds || 0, res.llm ? res.llm.provider : '', res.llm ? res.llm.model : '',
+      (res.rounds || 0) + (res.segments > 1 ? '×' + res.segments + '段' : ''), res.llm ? res.llm.provider : '', res.llm ? res.llm.model : '',
       res.llm ? res.llm.inputTokens : '', res.llm ? res.llm.outputTokens : '', ms, user
     ]);
   } catch (e) {
@@ -1026,24 +1095,99 @@ function notify_(msg) {
 
 // ================================================================ Llm.gs
 /**
- * Llm.gs — 可替換的 LLM 介面
+ * Llm.gs — 可替換的 LLM 介面（支援平行批次）
  *
- * 所有供應商都實作同一個合約：
- *   callLlmJson_(system, user, tool) → { data: <符合 tool.schema 的物件>, provider, model, inputTokens, outputTokens }
- * 要換模型或接學校自己的服務，只要改指令碼屬性 LLM_PROVIDER，或在下方 PROVIDERS 加一個函式。
+ * Apps Script 的 UrlFetchApp 單一請求約 60 秒就會中斷（不可調整），所以長文改成「分段＋平行」：
+ * Adjust.gs 把一章切成約 600 字的段落，這裡用 UrlFetchApp.fetchAll 同時送出，每段都在 60 秒內完成。
  *
- * 狀態：
- *   anthropic  依 Claude API 2026-10-21 版文件撰寫（強制工具呼叫，保證回傳結構化 JSON）。
- *   openai     預留：Chat Completions＋JSON 模式。模型名稱請依官方文件填 OPENAI_MODEL。
- *   gemini     預留：generateContent＋JSON 回應。模型名稱請依官方文件填 GEMINI_MODEL。
- *   custom     預留：POST {system, user, tool} 到 CUSTOM_LLM_URL，回傳 {data, usage?}。
+ * 每個供應商只要提供兩個函式：
+ *   build(system, user, tool, model) → { url, headers, body }
+ *   parse(json)                      → { data, inputTokens, outputTokens }（格式不符時 throw）
+ * 對外：
+ *   callLlmBatch_(system, users[], tool) → [{ ok, data, provider, model, inputTokens, outputTokens } | { ok:false, error }]
+ *   callLlmJson_(system, user, tool)     → 單一請求，失敗時 throw
+ *
+ * 狀態：anthropic 依 Claude API 2026-10-21 版文件撰寫；openai、gemini、custom 為預留，未實測。
  */
 
 var GR_PROVIDERS_ = {
-  anthropic: callAnthropic_,
-  openai: callOpenAI_,
-  gemini: callGemini_,
-  custom: callCustom_
+  anthropic: {
+    build: function (system, user, tool, model) {
+      return {
+        url: 'https://api.anthropic.com/v1/messages',
+        headers: { 'x-api-key': prop_('ANTHROPIC_API_KEY'), 'anthropic-version': GR_CONFIG.defaults.ANTHROPIC_VERSION },
+        body: {
+          model: model, max_tokens: propInt_('LLM_MAX_TOKENS'), system: system,
+          messages: [{ role: 'user', content: user }],
+          tools: [{ name: tool.name, description: tool.description, input_schema: tool.schema }],
+          tool_choice: { type: 'tool', name: tool.name }
+        }
+      };
+    },
+    parse: function (res) {
+      if (res.stop_reason === 'max_tokens') throw new Error('模型輸出被截斷（達到 LLM_MAX_TOKENS）。請調小 SEGMENT_CHARS 或調高 LLM_MAX_TOKENS。');
+      var block = (res.content || []).filter(function (b) { return b.type === 'tool_use'; })[0];
+      if (!block || !block.input) throw new Error('模型沒有回傳結構化結果（stop_reason=' + res.stop_reason + '）。');
+      var u = res.usage || {};
+      return { data: block.input, inputTokens: u.input_tokens || 0, outputTokens: u.output_tokens || 0 };
+    }
+  },
+
+  // 預留：OpenAI 相容（Chat Completions＋JSON 模式）
+  openai: {
+    build: function (system, user, tool, model) {
+      return {
+        url: String(prop_('OPENAI_BASE_URL')).replace(/\/+$/, '') + '/chat/completions',
+        headers: { Authorization: 'Bearer ' + prop_('OPENAI_API_KEY') },
+        body: { model: model, max_tokens: propInt_('LLM_MAX_TOKENS'), response_format: { type: 'json_object' },
+                messages: [{ role: 'system', content: system + jsonInstruction_(tool) }, { role: 'user', content: user }] }
+      };
+    },
+    parse: function (res) {
+      var msg = res.choices && res.choices[0] && res.choices[0].message;
+      if (!msg || !msg.content) throw new Error('OpenAI 回應格式不符。');
+      var u = res.usage || {};
+      return { data: parseJsonLoose_(msg.content), inputTokens: u.prompt_tokens || 0, outputTokens: u.completion_tokens || 0 };
+    }
+  },
+
+  // 預留：Gemini（generateContent＋JSON 回應）
+  gemini: {
+    build: function (system, user, tool, model) {
+      return {
+        url: 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent',
+        headers: { 'x-goog-api-key': prop_('GEMINI_API_KEY') },
+        body: { systemInstruction: { parts: [{ text: system + jsonInstruction_(tool) }] },
+                contents: [{ role: 'user', parts: [{ text: user }] }],
+                generationConfig: { responseMimeType: 'application/json', maxOutputTokens: propInt_('LLM_MAX_TOKENS') } }
+      };
+    },
+    parse: function (res) {
+      var c = res.candidates && res.candidates[0];
+      var text = c && c.content && c.content.parts && c.content.parts.map(function (p) { return p.text || ''; }).join('');
+      if (!text) throw new Error('Gemini 回應格式不符（finishReason=' + (c && c.finishReason) + '）。');
+      var u = res.usageMetadata || {};
+      return { data: parseJsonLoose_(text), inputTokens: u.promptTokenCount || 0, outputTokens: u.candidatesTokenCount || 0 };
+    }
+  },
+
+  /**
+   * 預留：自訂端點（學校自建服務、Cloud Run 代理、校內模型）
+   *   POST CUSTOM_LLM_URL，Authorization: Bearer CUSTOM_LLM_TOKEN（有設定才送）
+   *   { "system": "...", "user": "...", "tool": { "name": "...", "schema": {...} } }
+   * 回應：{ "data": {...符合 schema...}, "usage": { "input_tokens": 0, "output_tokens": 0 } }
+   */
+  custom: {
+    build: function (system, user, tool) {
+      var token = prop_('CUSTOM_LLM_TOKEN', '');
+      return { url: prop_('CUSTOM_LLM_URL'), headers: token ? { Authorization: 'Bearer ' + token } : {},
+               body: { system: system, user: user, tool: { name: tool.name, schema: tool.schema } } };
+    },
+    parse: function (res) {
+      var u = res.usage || {};
+      return { data: res.data || res, inputTokens: u.input_tokens || 0, outputTokens: u.output_tokens || 0 };
+    }
+  }
 };
 
 function llmStatus_() {
@@ -1056,93 +1200,29 @@ function llmStatus_() {
                  : '請在指令碼屬性設定 ' + (need || 'LLM_PROVIDER') + (model ? '' : ' 與模型名稱') + '。') };
 }
 
-function callLlmJson_(system, user, tool) {
+/** 同時送出多個請求；每個結果各自成功或失敗，不會因一段失敗而全部失敗。 */
+function callLlmBatch_(system, users, tool) {
   var st = llmStatus_();
   if (!st.configured) throw new Error('尚未設定 LLM：' + st.hint);
-  var fn = GR_PROVIDERS_[st.provider];
-  if (!fn) throw new Error('不支援的 LLM_PROVIDER：' + st.provider);
-  var out = fn(system, user, tool, st.model);
-  out.provider = st.provider;
-  out.model = st.model;
-  return out;
-}
-
-// ----------------------------------------------------------------------------- Claude（預設）
-
-function callAnthropic_(system, user, tool, model) {
-  var body = {
-    model: model,
-    max_tokens: propInt_('LLM_MAX_TOKENS'),
-    system: system,
-    messages: [{ role: 'user', content: user }],
-    tools: [{ name: tool.name, description: tool.description, input_schema: tool.schema }],
-    tool_choice: { type: 'tool', name: tool.name }
-  };
-  var res = httpJson_('https://api.anthropic.com/v1/messages', {
-    'x-api-key': prop_('ANTHROPIC_API_KEY'),
-    'anthropic-version': GR_CONFIG.defaults.ANTHROPIC_VERSION
-  }, body);
-  if (res.stop_reason === 'max_tokens') {
-    throw new Error('模型輸出被截斷（達到 LLM_MAX_TOKENS）。請縮短文本、分章處理，或調高 LLM_MAX_TOKENS。');
-  }
-  var block = (res.content || []).filter(function (b) { return b.type === 'tool_use'; })[0];
-  if (!block || !block.input) throw new Error('模型沒有回傳結構化結果（stop_reason=' + res.stop_reason + '）。');
-  var u = res.usage || {};
-  return { data: block.input, inputTokens: u.input_tokens || 0, outputTokens: u.output_tokens || 0 };
-}
-
-// ----------------------------------------------------------------------------- 預留：OpenAI 相容
-
-function callOpenAI_(system, user, tool, model) {
-  var base = String(prop_('OPENAI_BASE_URL')).replace(/\/+$/, '');
-  var res = httpJson_(base + '/chat/completions', { Authorization: 'Bearer ' + prop_('OPENAI_API_KEY') }, {
-    model: model,
-    max_tokens: propInt_('LLM_MAX_TOKENS'),
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: system + jsonInstruction_(tool) },
-      { role: 'user', content: user }
-    ]
+  var prov = GR_PROVIDERS_[st.provider];
+  if (!prov) throw new Error('不支援的 LLM_PROVIDER：' + st.provider);
+  var reqs = users.map(function (u) { return prov.build(system, u, tool, st.model); });
+  return httpJsonBatch_(reqs).map(function (r) {
+    if (!r.ok) return { ok: false, error: r.error };
+    try {
+      var out = prov.parse(r.json);
+      out.ok = true; out.provider = st.provider; out.model = st.model;
+      return out;
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
   });
-  var msg = res.choices && res.choices[0] && res.choices[0].message;
-  if (!msg || !msg.content) throw new Error('OpenAI 回應格式不符。');
-  var u = res.usage || {};
-  return { data: parseJsonLoose_(msg.content), inputTokens: u.prompt_tokens || 0, outputTokens: u.completion_tokens || 0 };
 }
 
-// ----------------------------------------------------------------------------- 預留：Gemini
-
-function callGemini_(system, user, tool, model) {
-  var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent';
-  var res = httpJson_(url, { 'x-goog-api-key': prop_('GEMINI_API_KEY') }, {
-    systemInstruction: { parts: [{ text: system + jsonInstruction_(tool) }] },
-    contents: [{ role: 'user', parts: [{ text: user }] }],
-    generationConfig: { responseMimeType: 'application/json', maxOutputTokens: propInt_('LLM_MAX_TOKENS') }
-  });
-  var c = res.candidates && res.candidates[0];
-  var text = c && c.content && c.content.parts && c.content.parts.map(function (p) { return p.text || ''; }).join('');
-  if (!text) throw new Error('Gemini 回應格式不符（finishReason=' + (c && c.finishReason) + '）。');
-  var u = res.usageMetadata || {};
-  return { data: parseJsonLoose_(text), inputTokens: u.promptTokenCount || 0, outputTokens: u.candidatesTokenCount || 0 };
-}
-
-// ----------------------------------------------------------------------------- 預留：自訂端點
-
-/**
- * 自訂端點合約（學校自建服務、Cloud Run 代理、校內模型都可以）：
- *   POST CUSTOM_LLM_URL
- *   Authorization: Bearer CUSTOM_LLM_TOKEN（有設定才送）
- *   { "system": "...", "user": "...", "tool": { "name": "...", "schema": {...} } }
- * 回應：{ "data": {...符合 schema...}, "usage": { "input_tokens": 0, "output_tokens": 0 } }
- */
-function callCustom_(system, user, tool) {
-  var token = prop_('CUSTOM_LLM_TOKEN', '');
-  var res = httpJson_(prop_('CUSTOM_LLM_URL'), token ? { Authorization: 'Bearer ' + token } : {}, {
-    system: system, user: user, tool: { name: tool.name, schema: tool.schema }
-  });
-  var data = res.data || res;
-  var u = res.usage || {};
-  return { data: data, inputTokens: u.input_tokens || 0, outputTokens: u.output_tokens || 0 };
+function callLlmJson_(system, user, tool) {
+  var r = callLlmBatch_(system, [user], tool)[0];
+  if (!r.ok) throw new Error(r.error);
+  return r;
 }
 
 // ----------------------------------------------------------------------------- 共用
@@ -1161,30 +1241,44 @@ function parseJsonLoose_(text) {
   throw new Error('模型回傳的不是有效的 JSON。');
 }
 
-/** POST JSON；遇到 429／5xx／529 自動退避重試。錯誤訊息不含金鑰。 */
-function httpJson_(url, headers, body) {
+/**
+ * 平行 POST JSON：[{url, headers, body}] → [{ ok, json } | { ok:false, error }]。
+ * 429／5xx／529 與連線失敗會整批重試最多 2 次（只重送失敗的請求）。錯誤訊息不含金鑰。
+ */
+function httpJsonBatch_(reqs) {
   var retryable = { 408: 1, 429: 1, 500: 1, 502: 1, 503: 1, 504: 1, 529: 1 };
-  var last = '';
-  for (var attempt = 0; attempt < 3; attempt++) {
+  var results = reqs.map(function () { return null; });
+  var pending = reqs.map(function (_, i) { return i; });
+  for (var attempt = 0; attempt < 3 && pending.length; attempt++) {
     if (attempt) Utilities.sleep(2000 * Math.pow(2, attempt - 1));
-    var resp;
+    var resps;
     try {
-      resp = UrlFetchApp.fetch(url, {
-        method: 'post', contentType: 'application/json', headers: headers,
-        payload: JSON.stringify(body), muteHttpExceptions: true, followRedirects: true
-      });
+      resps = UrlFetchApp.fetchAll(pending.map(function (i) {
+        var q = reqs[i];
+        return { url: q.url, method: 'post', contentType: 'application/json', headers: q.headers,
+                 payload: JSON.stringify(q.body), muteHttpExceptions: true, followRedirects: true };
+      }));
     } catch (e) {
-      last = '連線失敗：' + e.message;
+      // 整批連線失敗（含約 60 秒逾時）：記下錯誤，下一輪重試
+      var msg = /timeout|timed out|逾時/i.test(e.message) ? '連線逾時（單次請求約 60 秒上限），請調小 SEGMENT_CHARS 或改用較快的模型' : '連線失敗：' + e.message;
+      pending.forEach(function (i) { results[i] = { ok: false, error: 'LLM 服務錯誤（' + msg + '）', retry: true }; });
       continue;
     }
-    var code = resp.getResponseCode(), text = resp.getContentText();
-    if (code >= 200 && code < 300) return JSON.parse(text);
-    var detail = text;
-    try { var j = JSON.parse(text); detail = (j.error && (j.error.message || j.error.type)) || j.message || text; } catch (e) {}
-    last = 'HTTP ' + code + '：' + String(detail).slice(0, 300);
-    if (!retryable[code]) break;
+    var next = [];
+    pending.forEach(function (i, k) {
+      var resp = resps[k], code = resp.getResponseCode(), text = resp.getContentText();
+      if (code >= 200 && code < 300) {
+        try { results[i] = { ok: true, json: JSON.parse(text) }; } catch (e) { results[i] = { ok: false, error: 'LLM 回應不是 JSON。' }; }
+        return;
+      }
+      var detail = text;
+      try { var j = JSON.parse(text); detail = (j.error && (j.error.message || j.error.type)) || j.message || text; } catch (e) {}
+      results[i] = { ok: false, error: 'LLM 服務錯誤（HTTP ' + code + '：' + String(detail).slice(0, 300) + '）' };
+      if (retryable[code]) next.push(i);
+    });
+    pending = next;
   }
-  throw new Error('LLM 服務錯誤（' + last + '）');
+  return results.map(function (r) { return r ? { ok: r.ok, json: r.json, error: r.error } : { ok: false, error: 'LLM 沒有回應。' }; });
 }
 
 
@@ -1213,8 +1307,8 @@ var GR_SYSTEM_PROMPT = [
   '10. 等級資訊只能引用本訊息提供的自動檢核結果；其他等級判斷一律寫「推估」。不要自創 TBCL 能力指標代碼。',
   '11. 不論使用者介面是哪一種語言，revised_text、changes、grammar_notes、summary 一律以臺灣正體中文撰寫；只有 kept_above_level 的 english 欄位寫英譯。',
   '',
-  '修訂紀錄 changes：每一處修改寫一條。original 必須是「待修改文本」中逐字存在的片段；revised 是修改後片段；',
-  'category 從「詞彙、語法、句長、用語、字形、自然度、內容、其他」擇一；reason 用一句話說明，例如「擁擠為第 5 級（依詞表），改用第 1 級的『人很多』」。',
+  '修訂紀錄 changes：每一處修改寫一條，同一個詞在多處的相同替換合併成一條。original 必須是「待修改文本」中逐字存在的短片段（不要整句照抄）；revised 是修改後片段；',
+  'category 從「詞彙、語法、句長、用語、字形、自然度、內容、其他」擇一；reason 不超過 25 字，例如「擁擠第 5 級，改用第 1 級的人很多」。',
   '完成後呼叫 submit_revision 工具提交，不要另外輸出文字。'
 ].join('\n');
 
@@ -1280,16 +1374,18 @@ var GR_DIRECTION_LABEL = { down: '降級', up: '升級', polish: '維持等級�
  *  plan：{ target, direction, purpose, learner, protected, known, glossary, notes, round, prevIssues }
  */
 function buildUserPrompt_(draft, an, plan, ctx) {
-  var L = grLevelInfo(plan.target);
+  var L = grLevelInfo(plan.target), T = GR_TOCFL[plan.stop !== undefined ? plan.stop : grStopOfTbcl(plan.target)];
   var P = GR_PURPOSES[plan.purpose] || GR_PURPOSES.extensive;
   var lines = [];
   var est = an.estimate;
   var estText = est.level ? '第 ' + est.level + ' 級' : (est.beyond ? '高於第 7 級（或未收錄詞過多）' : '無法估計');
 
-  lines.push('【目標】' + grLevelLabel(plan.target));
+  lines.push('【目標】' + grTargetLabel(T.stop));
+  if (T.strictStar) lines.push('- 準備一級：只用 TBCL 第 1 級裡標示「第1級」的詞；標示「第1*級」的詞（第 1 級後段）也算超綱。句子以 6 字左右的短句為主。');
   lines.push('- 本級學習者能力：' + L.performance);
   lines.push('- 文本類型：' + L.textType);
-  if (L.sentLenGuide) lines.push('- 建議平均句長：' + L.sentLenGuide + ' 字以內（編者經驗值）');
+  var guide = plan.sentLenGuide || L.sentLenGuide;
+  if (guide) lines.push('- 建議平均句長：' + guide + ' 字以內（編者經驗值）');
   lines.push('- 用途：' + P.label + '，可理解覆蓋率目標 ≥' + Math.round(P.threshold * 100) + '%');
   lines.push('- 學習者：' + (GR_LEARNERS[plan.learner] || GR_LEARNERS.adult_nonchar));
   lines.push('- 調整方向：' + GR_DIRECTION_LABEL[plan.direction] + '（目前估計適讀等級：' + estText + '）');
@@ -1300,12 +1396,12 @@ function buildUserPrompt_(draft, an, plan, ctx) {
     lines.push('- 目標級以內詞次覆蓋率 ' + an.target.withinPct + '%；含生詞、已學詞、專名後可理解覆蓋率 ' + an.target.effectivePct + '%');
     var must = an.target.above.filter(function (a) { return !a.glossed; });
     if (must.length) {
-      lines.push('- 必須處理的超綱詞（詞／TBCL 級／次數）：' + must.map(function (a) { return a.w + '／' + a.lv + '／' + a.n; }).join('、'));
+      lines.push('- 必須處理的超綱詞（詞／TBCL 級／次數）：' + must.map(function (a) { return a.w + '／' + (a.lvl || a.lv) + '／' + a.n; }).join('、'));
     } else {
       lines.push('- 沒有未處理的超綱詞。');
     }
     var kept = an.target.above.filter(function (a) { return a.glossed; });
-    if (kept.length) lines.push('- 超綱但已列為生詞或保留詞（可以保留）：' + kept.map(function (a) { return a.w + '（' + a.lv + '）'; }).join('、'));
+    if (kept.length) lines.push('- 超綱但已列為生詞或保留詞（可以保留）：' + kept.map(function (a) { return a.w + '（' + (a.lvl || a.lv) + '）'; }).join('、'));
     if (an.oov.length) lines.push('- 詞表未收錄的片段（可能是超綱詞、專名或錯字，請自行判斷）：' + an.oov.slice(0, 30).map(function (o) { return o.w; }).join('、'));
     if (plan.direction === 'up') {
       lines.push('- 第 ' + plan.target + ' 級詞語目前佔 ' + an.target.targetLevelShare + '% 詞次；請多用第 ' + plan.target + ' 級的詞語與句式。');
@@ -1336,6 +1432,11 @@ function buildUserPrompt_(draft, an, plan, ctx) {
     if (near.length) lines.push('【第 ' + Math.max(1, plan.target - 1) + '–' + plan.target + ' 級可用語法點（TBCL 語法點表）】' + near.slice(0, 250).map(function (x) { return x.name; }).join('、'));
   }
   if (plan.notes) lines.push('【教師補充指示】' + String(plan.notes).slice(0, 1000));
+
+  if (plan.segCount > 1) {
+    lines.push('');
+    lines.push('【分段】全文分成 ' + plan.segCount + ' 段同時處理，這是第 ' + (plan.segIndex + 1) + ' 段。只改這一段，不要補寫前後文；人物與用詞請與全文一致。');
+  }
 
   if (plan.round > 1 && plan.prevIssues) {
     lines.push('');
@@ -1400,13 +1501,14 @@ var GRReport = (function () {
     p('# 分級讀本編修報告');
     p();
     h('定位摘要');
-    p('- 目標等級：' + grLevelLabel(res.target));
-    p('- 文本類型（第 ' + L.level + ' 級）：' + L.textType + (L.sentLenGuide ? '；建議平均句長 ' + L.sentLenGuide + ' 字以內（經驗值）' : ''));
+    p('- 目標等級：' + (res.levelLabel || grLevelLabel(res.target)));
+    var guide = (GR_TOCFL[res.tocfl] && GR_TOCFL[res.tocfl].sentLenGuide) || L.sentLenGuide;
+    p('- 文本類型（第 ' + L.level + ' 級）：' + L.textType + (guide ? '；建議平均句長 ' + guide + ' 字以內（經驗值）' : ''));
     p('- 用途：' + P.label + '，可理解覆蓋率門檻 ' + Math.round(P.threshold * 100) + '%（第二語言閱讀研究經驗值，非官方標準）');
     p('- 學習者：' + (GR_LEARNERS[res.learner] || GR_LEARNERS.adult_nonchar));
     p('- 詞表：' + (b.meta.lexiconLoaded ? (res.lexiconLabel || 'TBCL 詞語表') : '未載入（所有等級為推估）'));
     if (res.action === 'adjust') {
-      p('- 調整方向：' + res.directionLabel + '；改寫 ' + res.rounds + ' 輪；驗證結果：'
+      p('- 調整方向：' + res.directionLabel + '；改寫 ' + res.rounds + ' 輪' + (res.segments > 1 ? '（分 ' + res.segments + ' 段平行處理）' : '') + '；驗證結果：'
         + (!res.verified ? '未驗證（無詞表）' : res.passed ? '通過' : '未完全通過'));
       if (res.llm && res.llm.model) p('- 改寫模型：' + res.llm.provider + ' / ' + res.llm.model);
     }
@@ -1417,7 +1519,7 @@ var GRReport = (function () {
     metricsRows(b, a, hasAfter).forEach(function (r) { p('| ' + r[0] + ' | ' + r[1] + (hasAfter ? ' | ' + r[2] : '') + ' |'); });
     p();
     if (b.target && b.target.above.length) {
-      p('修訂前超綱詞：' + b.target.above.map(function (x) { return x.w + '（' + x.lv + '）×' + x.n; }).join('、'));
+      p('修訂前超綱詞：' + b.target.above.map(function (x) { return x.w + '（' + (x.lvl || x.lv) + '）×' + x.n; }).join('、'));
       p();
     }
     if (b.warnings && b.warnings.length) { b.warnings.forEach(function (w) { p('> ' + w); }); p(); }
@@ -1443,7 +1545,7 @@ var GRReport = (function () {
       p();
       p('| 詞 | TBCL 級 | 次數 | 漢語拼音 | 注音 | 詞類 | 英譯 | 來源／理由 |\n|---|---|---|---|---|---|---|---|');
       res.glossary.forEach(function (g) {
-        p('| ' + cell(g.w) + ' | ' + (g.lv || '未收錄') + ' | ' + g.n + ' | ' + cell(g.py) + ' | ' + cell(g.zy) + ' | ' + cell(g.pos) + ' | ' + cell(g.en) + ' | ' + cell(g.source + (g.reason ? '：' + g.reason : '')) + ' |');
+        p('| ' + cell(g.w) + ' | ' + (g.lvl || g.lv || '未收錄') + ' | ' + g.n + ' | ' + cell(g.py) + ' | ' + cell(g.zy) + ' | ' + cell(g.pos) + ' | ' + cell(g.en) + ' | ' + cell(g.source + (g.reason ? '：' + g.reason : '')) + ' |');
       });
       p();
     }
@@ -1485,11 +1587,19 @@ var GRReport = (function () {
 
 function normalizeRequest_(req) {
   req = req || {};
-  var t = parseInt(req.target, 10);
-  if (!(t >= 1 && t <= 7)) t = 3;
+  // 目標等級：優先用 TOCFL 八級（tocfl：0–7 或 N1、A2…）；只給 TBCL target 時，第 1 級視為準備二級
+  var stop = grParseTocfl(req.tocfl);
+  if (stop < 0) {
+    var t = parseInt(req.target, 10);
+    stop = grStopOfTbcl(t >= 1 && t <= 7 ? t : 3);
+  }
+  var T = GR_TOCFL[stop];
   return {
-    text: String(req.text || '').replace(/\r\n?/g, '\n'),
-    target: t,
+    text: GRAnalyzer.stripSelectors(String(req.text || '')).replace(/\r\n?/g, '\n'),
+    stop: stop,
+    target: T.tbcl,
+    strictStar: !!T.strictStar,
+    sentLenGuide: T.sentLenGuide || grLevelInfo(T.tbcl).sentLenGuide,
     mode: ['auto', 'down', 'up', 'localize'].indexOf(req.mode) >= 0 ? req.mode : 'auto',
     purpose: GR_PURPOSES[req.purpose] ? req.purpose : 'extensive',
     learner: GR_LEARNERS[req.learner] ? req.learner : 'adult_nonchar',
@@ -1504,16 +1614,16 @@ function normalizeRequest_(req) {
 }
 
 function analysisOpts_(plan, ctx, extraGlossary) {
-  var L = grLevelInfo(plan.target);
   return {
     target: plan.target,
+    strictStar: plan.strictStar,
     purpose: plan.purpose,
     threshold: GR_PURPOSES[plan.purpose].threshold,
     glossary: plan.glossary + (extraGlossary && extraGlossary.length ? '\n' + extraGlossary.join('\n') : ''),
     known: plan.known,
     proper: GRAnalyzer.parseWordList(plan.protectedWords).concat(ctx.proper || []),
     stripSpeakers: plan.stripSpeakers,
-    sentLenGuide: L.sentLenGuide
+    sentLenGuide: plan.sentLenGuide
   };
 }
 
@@ -1522,6 +1632,7 @@ function decideDirection_(mode, an, target) {
   if (mode === 'down' || mode === 'up') return mode;
   var est = an.estimate;
   if (!an.meta.lexiconLoaded) return 'down';
+  if (an.target && an.target.strictStar && an.target.aboveUnglossedTypes) return 'down';
   if (est.level === null) return est.beyond ? 'down' : 'polish';
   if (est.level > target) return 'down';
   if (est.level < target) return 'up';
@@ -1539,12 +1650,11 @@ function maxNewWords_(an) {
 
 function checkPass_(after, strict, plan, direction, keptCount) {
   var issues = [];
-  var L = grLevelInfo(plan.target);
   if (after.meta.lexiconLoaded) {
     var t = after.target;
     if (!t.pass) issues.push('可理解覆蓋率 ' + t.effectivePct + '%，未達 ' + t.threshold + '%');
     var remaining = t.above.filter(function (a) { return !a.glossed; });
-    if (remaining.length) issues.push('仍有超綱詞：' + remaining.slice(0, 20).map(function (a) { return a.w + '（' + a.lv + '）'; }).join('、'));
+    if (remaining.length) issues.push('仍有超綱詞：' + remaining.slice(0, 20).map(function (a) { return a.w + '（' + (a.lvl || a.lv) + '）'; }).join('、'));
     var cap = maxNewWords_(after);
     if (keptCount > cap) issues.push('刻意保留的生詞有 ' + keptCount + ' 個，超過建議上限 ' + cap + ' 個，請再替換一些');
     if (direction === 'up' && strict.estimate.level !== null && strict.estimate.level < plan.target) {
@@ -1554,15 +1664,16 @@ function checkPass_(after, strict, plan, direction, keptCount) {
   if (after.norms && after.norms.simplified.length) {
     issues.push('仍有簡體字：' + after.norms.simplified.map(function (s) { return s.c; }).join('、'));
   }
-  if (L.sentLenGuide && after.sentences.mean > L.sentLenGuide * 1.2) {
-    issues.push('平均句長 ' + after.sentences.mean + ' 字，高於建議的 ' + L.sentLenGuide + ' 字');
+  if (plan.sentLenGuide && after.sentences.mean > plan.sentLenGuide * 1.2) {
+    issues.push('平均句長 ' + after.sentences.mean + ' 字，高於建議的 ' + plan.sentLenGuide + ' 字');
   }
   return { pass: issues.length === 0, issues: issues.join('；') };
 }
 
 function alignmentStatement_(an, plan, ctx) {
-  var L = grLevelInfo(plan.target);
-  var s = '本文目標為 TBCL 第 ' + L.level + ' 級（' + L.band + '），對應 TOCFL ' + L.tocfl + '（' + L.tocflEn + '，CEFR ' + L.cefr + '）。';
+  var T = GR_TOCFL[plan.stop], L = grLevelInfo(plan.target);
+  var s = '本文目標為 TOCFL ' + T.name + '（' + T.code + '，CEFR ' + T.cefr + '），對應 TBCL 第 ' + L.level + ' 級（' + L.band + '）';
+  s += T.strictStar ? '前段：只用詞表標示「第1級」的詞，「第1*級」詞視為超綱（本工具的區分方式，非官方對應）。' : '。';
   if (an.meta.lexiconLoaded && an.target) {
     var est = an.estimate.level ? '第 ' + an.estimate.level + ' 級' : (an.estimate.beyond ? '高於第 7 級' : '無法估計');
     s += '含生詞後可理解覆蓋率 ' + an.target.effectivePct + '%，適讀等級估計為' + est
@@ -1573,6 +1684,11 @@ function alignmentStatement_(an, plan, ctx) {
   return s + 'TBCL 與 TOCFL 為整體對應，逐技能可能錯開一級；語法與自然度需人工確認。';
 }
 
+function baseResult_(action, plan, ctx) {
+  return { ok: true, action: action, tocfl: plan.stop, target: plan.target, levelLabel: grTargetLabel(plan.stop),
+           purpose: plan.purpose, learner: plan.learner, lexiconLabel: ctx.lexLabel || '', warnings: [] };
+}
+
 function runAnalyzeCore_(req, ctx) {
   var plan = normalizeRequest_(req);
   if (!plan.text.trim()) throw new Error('請貼上要分析的文本。');
@@ -1580,19 +1696,58 @@ function runAnalyzeCore_(req, ctx) {
   var an = GRAnalyzer.analyze(plan.text, ctx, analysisOpts_(plan, ctx));
   if (!plan.includeSpans) delete an.spans;
   var direction = decideDirection_(plan.mode, an, plan.target);
-  var res = {
-    ok: true, action: 'analyze', target: plan.target, levelLabel: grLevelLabel(plan.target),
-    purpose: plan.purpose, learner: plan.learner,
-    before: an, after: an, direction: direction, directionLabel: GR_DIRECTION_LABEL[direction],
-    statement: alignmentStatement_(an, plan, ctx), lexiconLabel: ctx.lexLabel || '', warnings: []
-  };
+  var res = baseResult_('analyze', plan, ctx);
+  res.before = an; res.after = an; res.direction = direction; res.directionLabel = GR_DIRECTION_LABEL[direction];
+  res.statement = alignmentStatement_(an, plan, ctx);
   if (plan.includeReport) res.report = GRReport.markdown(res);
   return res;
 }
 
+// ----------------------------------------------------------------------------- 分段
+
+function hanCount_(s) { return Array.from(s || '').filter(GRAnalyzer.isHan).length; }
+
 /**
- * deps = { callLlm(system, user, tool) → {data, provider, model, inputTokens, outputTokens},
- *          consumeQuota(), maxRounds, maxChars }
+ * 依段落切成每段約 maxHan 個漢字的區塊；單一段落過長時依句號切開。
+ * 回傳 [{ t, glue }]，glue 是該區塊後面接的分隔（'\n' 或 ''），全部接回去等於原文。
+ */
+function splitSegments_(text, maxHan) {
+  var out = [], cur = [], curN = 0;
+  var flush = function () { if (cur.length) { out.push({ t: cur.join('\n'), glue: '\n' }); cur = []; curN = 0; } };
+  text.split('\n').forEach(function (line) {
+    var n = hanCount_(line);
+    if (n > maxHan) {
+      flush();
+      var parts = line.match(/[^。！？!?…]+[。！？!?…]*[」』）)"]*/g) || [line];
+      if (parts.join('') !== line) parts = [line];
+      var buf = '', bn = 0;
+      parts.forEach(function (p) {
+        var pn = hanCount_(p);
+        if (buf && bn + pn > maxHan) { out.push({ t: buf, glue: '' }); buf = ''; bn = 0; }
+        buf += p; bn += pn;
+      });
+      out.push({ t: buf, glue: '\n' });
+      return;
+    }
+    if (cur.length && curN + n > maxHan) flush();
+    cur.push(line); curN += n;
+  });
+  flush();
+  if (out.length) out[out.length - 1].glue = '';
+  return out.map(function (s) {
+    var lead = /^[\s　]*/.exec(s.t)[0], trail = /[\s　]*$/.exec(s.t.slice(lead.length))[0];
+    return { lead: lead, core: s.t.slice(lead.length, s.t.length - trail.length), trail: trail, glue: s.glue,
+             active: hanCount_(s.t) > 0 };
+  });
+}
+
+function joinSegments_(segs) {
+  return segs.map(function (s) { return s.lead + s.core + s.trail + s.glue; }).join('');
+}
+
+/**
+ * deps = { callLlmBatch(system, users[], tool) → [{ok, data, provider, model, inputTokens, outputTokens} | {ok:false, error}],
+ *          consumeQuota(n), maxRounds, maxChars, segmentChars }
  */
 function runAdjustCore_(req, ctx, deps) {
   var plan = normalizeRequest_(req);
@@ -1603,15 +1758,13 @@ function runAdjustCore_(req, ctx, deps) {
     throw new Error('文本有 ' + before.stats.hanChars + ' 個漢字，超過單次調整上限 ' + deps.maxChars + ' 字。長篇讀本請分章調整（分析功能不受此限）。');
   }
   var direction = decideDirection_(plan.mode, before, plan.target);
-  var res = {
-    ok: true, action: 'adjust', target: plan.target, levelLabel: grLevelLabel(plan.target),
-    purpose: plan.purpose, learner: plan.learner,
+  var res = baseResult_('adjust', plan, ctx);
+  Object.assign(res, {
     direction: direction, directionLabel: GR_DIRECTION_LABEL[direction],
-    before: before, after: before, revisedText: plan.text, rounds: 0, passed: false,
+    before: before, after: before, revisedText: plan.text, rounds: 0, segments: 0, passed: false,
     verified: before.meta.lexiconLoaded, issues: '', changes: [], glossary: [], grammarNotes: [],
-    summary: '', warnings: [], llm: { provider: '', model: '', inputTokens: 0, outputTokens: 0 },
-    lexiconLabel: ctx.lexLabel || ''
-  };
+    summary: '', llm: { provider: '', model: '', calls: 0, inputTokens: 0, outputTokens: 0 }
+  });
 
   // 已合級又沒有規範問題：不呼叫 LLM，省下費用
   var first = checkPass_(before, before, plan, direction, 0);
@@ -1621,40 +1774,77 @@ function runAdjustCore_(req, ctx, deps) {
     return finishAdjust_(res, plan, ctx);
   }
 
-  var draft = plan.text, current = before, kept = {}, summaries = [], prevIssues = '';
+  var segs = splitSegments_(plan.text, Math.max(150, deps.segmentChars || 600));
+  var active = [];
+  segs.forEach(function (s, i) { if (s.active) active.push(i); });
+  res.segments = active.length;
+  var kept = {}, summaries = [], segIssues = {};
+  var keptIn = function (text) { return Object.keys(kept).filter(function (w) { return text.indexOf(w) >= 0; }); };
+  var segCheck = function (i) {
+    var t = segs[i].core;
+    var a = GRAnalyzer.analyze(t, ctx, Object.assign(analysisOpts_(plan, ctx, keptIn(t)), { withSpans: false }));
+    var st = GRAnalyzer.analyze(t, ctx, Object.assign({}, opts, { withSpans: false }));
+    return { an: a, check: checkPass_(a, st, plan, direction, 0) };
+  };
+
+  var todo = active.slice(), draft = plan.text, current = before;
   var maxRounds = Math.max(1, deps.maxRounds || 1);
-  while (res.rounds < maxRounds) {
+  while (res.rounds < maxRounds && todo.length) {
+    try {
+      deps.consumeQuota(todo.length);
+    } catch (e) {
+      if (res.rounds === 0) throw e;
+      res.warnings.push('第 ' + (res.rounds + 1) + ' 輪沒有執行（' + e.message + '），保留第 ' + res.rounds + ' 輪的修訂稿。');
+      break;
+    }
     res.rounds++;
-    deps.consumeQuota();
-    var user = buildUserPrompt_(draft, current, {
-      target: plan.target, direction: direction, purpose: plan.purpose, learner: plan.learner,
-      protectedWords: plan.protectedWords, known: plan.known, glossary: plan.glossary,
-      notes: plan.notes, round: res.rounds, prevIssues: prevIssues
-    }, ctx);
-    var out = deps.callLlm(GR_SYSTEM_PROMPT, user, GR_REVISION_TOOL);
-    var d = out.data || {};
-    var revised = String(d.revised_text || '').replace(/\r\n?/g, '\n').trim();
-    if (!revised) throw new Error('模型沒有回傳修訂稿。');
-
-    (d.changes || []).forEach(function (c) {
-      res.changes.push({ round: res.rounds, original: String(c.original || ''), revised: String(c.revised || ''),
-                         category: String(c.category || '其他'), reason: String(c.reason || ''),
-                         located: draft.indexOf(String(c.original || '')) >= 0 });
+    var round = res.rounds;
+    var users = todo.map(function (i) {
+      var t = segs[i].core;
+      var segAn = GRAnalyzer.analyze(t, ctx, Object.assign(analysisOpts_(plan, ctx, keptIn(t)), { withSpans: false }));
+      return buildUserPrompt_(t, segAn, {
+        stop: plan.stop, target: plan.target, strictStar: plan.strictStar, sentLenGuide: plan.sentLenGuide,
+        direction: direction, purpose: plan.purpose, learner: plan.learner,
+        protectedWords: plan.protectedWords, known: plan.known, glossary: plan.glossary, notes: plan.notes,
+        round: round, prevIssues: segIssues[i] || '', segIndex: active.indexOf(i), segCount: active.length
+      }, ctx);
     });
-    (d.kept_above_level || []).forEach(function (k) { if (k && k.word) kept[String(k.word).trim()] = k; });
-    (d.grammar_notes || []).forEach(function (g) {
-      if (g && g.point && !res.grammarNotes.some(function (x) { return x.point === g.point; })) res.grammarNotes.push(g);
+    var outs = deps.callLlmBatch(GR_SYSTEM_PROMPT, users, GR_REVISION_TOOL);
+    var okCount = 0, fails = [];
+    outs.forEach(function (out, k) {
+      var i = todo[k], seg = segs[i];
+      res.llm.calls++;
+      if (!out || !out.ok) { fails.push((out && out.error) || 'LLM 沒有回應'); return; }
+      var d = out.data || {};
+      var revised = String(d.revised_text || '').replace(/\r\n?/g, '\n').trim();
+      if (!revised) { fails.push('模型沒有回傳修訂稿'); return; }
+      okCount++;
+      (d.changes || []).forEach(function (c) {
+        res.changes.push({ round: round, segment: active.indexOf(i) + 1, original: String(c.original || ''), revised: String(c.revised || ''),
+                           category: String(c.category || '其他'), reason: String(c.reason || ''),
+                           located: seg.core.indexOf(String(c.original || '')) >= 0 });
+      });
+      (d.kept_above_level || []).forEach(function (kw) { if (kw && kw.word) kept[String(kw.word).trim()] = kw; });
+      (d.grammar_notes || []).forEach(function (g) {
+        if (g && g.point && !res.grammarNotes.some(function (x) { return x.point === g.point; })) res.grammarNotes.push(g);
+      });
+      if (d.summary && round === 1) summaries.push(String(d.summary));
+      seg.core = revised;
+      res.llm.provider = out.provider; res.llm.model = out.model;
+      res.llm.inputTokens += out.inputTokens || 0; res.llm.outputTokens += out.outputTokens || 0;
     });
-    if (d.summary) summaries.push(String(d.summary));
-    res.llm.provider = out.provider; res.llm.model = out.model;
-    res.llm.inputTokens += out.inputTokens || 0; res.llm.outputTokens += out.outputTokens || 0;
+    if (!okCount && round === 1) throw new Error(fails[0] || 'LLM 沒有回傳修訂稿。');
+    if (fails.length) {
+      var uniqFails = fails.filter(function (f, k) { return fails.indexOf(f) === k; });
+      res.warnings.push('第 ' + round + ' 輪有 ' + fails.length + ' 段沒有完成，該段保留' + (round === 1 ? '原文' : '上一版') + '：' + uniqFails.slice(0, 2).join('；'));
+    }
 
-    draft = revised;
-    var keptWords = Object.keys(kept).filter(function (w) { return draft.indexOf(w) >= 0; });
+    // 合併後整篇驗證
+    draft = joinSegments_(segs);
+    var keptWords = keptIn(draft);
     var strict = GRAnalyzer.analyze(draft, ctx, Object.assign({}, opts, { withSpans: false }));
     current = GRAnalyzer.analyze(draft, ctx, analysisOpts_(plan, ctx, keptWords));
-    current.strict = { effectivePct: strict.target.effectivePct, estimate: strict.estimate.level,
-                       beyond: strict.estimate.beyond };
+    current.strict = { effectivePct: strict.target.effectivePct, estimate: strict.estimate.level, beyond: strict.estimate.beyond };
     var keptAbove = keptWords.filter(function (w) {
       return current.target.above.some(function (a) { return a.w === w; }) || !(ctx.lex && ctx.lex.map[w]);
     });
@@ -1662,7 +1852,17 @@ function runAdjustCore_(req, ctx, deps) {
     res.passed = res.verified && check.pass;
     res.issues = check.issues;
     if (check.pass) break;
-    prevIssues = check.issues;
+
+    // 下一輪只重送沒過的段落；若每段單看都過、但整篇沒過（例如保留生詞太多），就全部重送
+    todo = active.filter(function (i) {
+      var c = segCheck(i).check;
+      segIssues[i] = c.issues;
+      return !c.pass;
+    });
+    if (!todo.length) {
+      todo = active.slice();
+      active.forEach(function (i) { segIssues[i] = check.issues; });
+    }
   }
 
   res.after = current;
@@ -1692,19 +1892,19 @@ function buildGlossary_(an, kept, plan, ctx, text) {
   (an.target ? an.target.above : []).forEach(function (a) {
     var k = kept[a.w] || {};
     seen[a.w] = true;
-    out.push({ w: a.w, lv: a.lv, n: a.n, py: a.py || '', zy: a.zy || '', pos: k.pos || '', en: k.english || '',
+    out.push({ w: a.w, lv: a.lv, lvl: a.lvl, n: a.n, py: a.py || '', zy: a.zy || '', pos: k.pos || '', en: k.english || '',
                reason: k.reason || '', source: k.word ? '模型保留' : (userGloss[a.w] ? '生詞表' : '未處理') });
   });
   // 模型保留、但詞表未收錄的詞（例如新詞、地方小吃）
   Object.keys(kept).forEach(function (w) {
     if (seen[w]) return;
     var e = ctx.lex && ctx.lex.map[w];
-    if (e && e.l <= plan.target) return;            // 其實沒有超綱，不必列
+    if (e && (e.l < plan.target || (e.l === plan.target && !(plan.strictStar && e.s)))) return;   // 其實沒有超綱，不必列
     var count = 0, i = -1;
     while ((i = text.indexOf(w, i + 1)) >= 0) count++;
     if (!count) return;                             // 修訂稿裡已經沒有這個詞
     var k = kept[w];
-    out.push({ w: w, lv: e ? e.l : null, n: count, py: e ? e.p : '', zy: e ? e.z : '', pos: k.pos || '', en: k.english || '',
+    out.push({ w: w, lv: e ? e.l : null, lvl: e ? (e.s && plan.strictStar ? e.l + '*' : String(e.l)) : '', n: count, py: e ? e.p : '', zy: e ? e.z : '', pos: k.pos || '', en: k.english || '',
                reason: k.reason || '', source: '模型保留' });
   });
   return out.sort(function (a, b) { return (b.lv || 8) - (a.lv || 8) || b.n - a.n; });
@@ -1721,7 +1921,11 @@ function buildGlossary_(an, kept, plan, ctx, text) {
 
 function doGet(e) {
   var p = (e && e.parameter) || {};
-  if (p.action === 'health') return jsonOut_(statusInfo_());
+  if (p.action === 'health') {
+    // 狀態資訊含模型與用量，需要 API 權杖；沒有權杖只回報服務正常
+    var token = prop_('API_TOKEN', '');
+    return jsonOut_(token && p.token === token ? { ok: true, status: statusInfo_() } : { ok: true });
+  }
   var t = HtmlService.createTemplateFromFile('Index');
   t.prefsJson = JSON.stringify(urlPrefs_(p)).replace(/</g, '\\u003c');
   return t.evaluate()
@@ -1743,13 +1947,16 @@ function urlPrefs_(p) {
   if (['std', 'pinyin', 'zhuyin'].indexOf(p.font) >= 0) out.font = p.font;
   if (['s', 'm', 'l'].indexOf(p.size) >= 0) out.size = p.size;
   if (/^[1-7]$/.test(p.level || '')) out.level = parseInt(p.level, 10);
+  var stop = grParseTocfl(p.tocfl);
+  if (stop >= 0) out.tocfl = stop;
+  if (['light', 'dark', 'auto'].indexOf(p.theme) >= 0) out.theme = p.theme;
   return out;
 }
 
 function uiBootstrap() {
   return safeRun_(function () {
     return {
-      ok: true, levels: GR_LEVELS, purposes: GR_PURPOSES, learners: GR_LEARNERS, status: statusInfo_(),
+      ok: true, levels: GR_LEVELS, tocfl: GR_TOCFL, purposes: GR_PURPOSES, learners: GR_LEARNERS, status: statusInfo_(),
       ui: {
         defaultLang: prop_('UI_DEFAULT_LANG'),
         fonts: { pinyinUrl: safeFontUrl_(prop_('TONEOZ_PINYIN_URL')), zhuyinUrl: safeFontUrl_(prop_('TONEOZ_ZHUYIN_URL')) },
@@ -1786,10 +1993,11 @@ function runAdjust_(req, source) {
   var st = llmStatus_();
   if (!st.configured) throw new Error('目前只能分析，尚未設定 LLM：' + st.hint);
   var res = runAdjustCore_(req, getContext_(), {
-    callLlm: callLlmJson_,
+    callLlmBatch: callLlmBatch_,
     consumeQuota: consumeQuota_,
     maxRounds: propInt_('MAX_ROUNDS'),
-    maxChars: propInt_('MAX_CHARS')
+    maxChars: propInt_('MAX_CHARS'),
+    segmentChars: propInt_('SEGMENT_CHARS')
   });
   appendLog_(source, 'adjust', normalizeRequest_(req), res, Date.now() - t0);
   return res;
@@ -1806,7 +2014,7 @@ function statusInfo_() {
     proper: ctx.proper.length,
     llm: { provider: llm.provider, model: llm.model, configured: llm.configured, hint: llm.hint },
     quota: quotaStatus_(),
-    limits: { maxChars: propInt_('MAX_CHARS'), maxRounds: propInt_('MAX_ROUNDS') }
+    limits: { maxChars: propInt_('MAX_CHARS'), maxRounds: propInt_('MAX_ROUNDS'), segmentChars: propInt_('SEGMENT_CHARS') }
   };
 }
 

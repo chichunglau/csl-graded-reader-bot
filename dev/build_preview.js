@@ -51,14 +51,16 @@ ${read('Adjust.gs')}
   function status() {
     return { version: GR_CONFIG.version, lexicon: { loaded: true, entries: lex.entries, forms: lex.forms, label: ctx.lexLabel },
              chars: 0, grammar: 0, proper: 0, llm: { provider: 'anthropic', model: 'claude-sonnet-5-5', configured: true, hint: '' },
-             quota: { used: used, limit: 200 }, limits: { maxChars: 3000, maxRounds: 2 } };
+             quota: { used: used, limit: 300 }, limits: { maxChars: 3000, maxRounds: 2, segmentChars: 600 } };
   }
   window.GR_PREVIEW = {
     note: '介面預覽：使用 ' + lex.entries + ' 詞的示範詞表（等級為示意，不是國教院 TBCL 資料），AI 改寫為預錄結果，只能示範內建範例。預覽環境不能載入外部字型檔，ToneOZ 字型只有在本機已安裝時才會顯示。正式版部署到 Google Apps Script 後，會讀取您匯入的 TBCL 詞表並呼叫 Claude API。',
-    uiBootstrap: function () { return { ok: true, levels: GR_LEVELS, purposes: GR_PURPOSES, learners: GR_LEARNERS, status: status(),
+    uiBootstrap: function () { return { ok: true, levels: GR_LEVELS, tocfl: GR_TOCFL, purposes: GR_PURPOSES, learners: GR_LEARNERS, status: status(),
       ui: { defaultLang: '', i18n: {}, fonts: { pinyinUrl: '', zhuyinUrl: '' } } }; },
     uiAnalyze: function (req) { return safe(function () { return runAnalyzeCore_(req, ctx); }); },
-    uiAdjust: function (req) { return safe(function () { return runAdjustCore_(req, ctx, { callLlm: fakeLlm, consumeQuota: function () { used++; }, maxRounds: 2, maxChars: 3000 }); }); }
+    uiAdjust: function (req) { return safe(function () { return runAdjustCore_(req, ctx, {
+      callLlmBatch: function (sys, users) { return users.map(function (u) { try { var r = fakeLlm(sys, u); r.ok = true; return r; } catch (e) { return { ok: false, error: e.message }; } }); },
+      consumeQuota: function (n) { used += n || 1; }, maxRounds: 2, maxChars: 3000, segmentChars: 600 }); }); }
   };
 })();
 `;

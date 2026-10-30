@@ -22,8 +22,8 @@ var GR_SYSTEM_PROMPT = [
   '10. 等級資訊只能引用本訊息提供的自動檢核結果；其他等級判斷一律寫「推估」。不要自創 TBCL 能力指標代碼。',
   '11. 不論使用者介面是哪一種語言，revised_text、changes、grammar_notes、summary 一律以臺灣正體中文撰寫；只有 kept_above_level 的 english 欄位寫英譯。',
   '',
-  '修訂紀錄 changes：每一處修改寫一條。original 必須是「待修改文本」中逐字存在的片段；revised 是修改後片段；',
-  'category 從「詞彙、語法、句長、用語、字形、自然度、內容、其他」擇一；reason 用一句話說明，例如「擁擠為第 5 級（依詞表），改用第 1 級的『人很多』」。',
+  '修訂紀錄 changes：每一處修改寫一條，同一個詞在多處的相同替換合併成一條。original 必須是「待修改文本」中逐字存在的短片段（不要整句照抄）；revised 是修改後片段；',
+  'category 從「詞彙、語法、句長、用語、字形、自然度、內容、其他」擇一；reason 不超過 25 字，例如「擁擠第 5 級，改用第 1 級的人很多」。',
   '完成後呼叫 submit_revision 工具提交，不要另外輸出文字。'
 ].join('\n');
 
@@ -89,16 +89,18 @@ var GR_DIRECTION_LABEL = { down: '降級', up: '升級', polish: '維持等級�
  *  plan：{ target, direction, purpose, learner, protected, known, glossary, notes, round, prevIssues }
  */
 function buildUserPrompt_(draft, an, plan, ctx) {
-  var L = grLevelInfo(plan.target);
+  var L = grLevelInfo(plan.target), T = GR_TOCFL[plan.stop !== undefined ? plan.stop : grStopOfTbcl(plan.target)];
   var P = GR_PURPOSES[plan.purpose] || GR_PURPOSES.extensive;
   var lines = [];
   var est = an.estimate;
   var estText = est.level ? '第 ' + est.level + ' 級' : (est.beyond ? '高於第 7 級（或未收錄詞過多）' : '無法估計');
 
-  lines.push('【目標】' + grLevelLabel(plan.target));
+  lines.push('【目標】' + grTargetLabel(T.stop));
+  if (T.strictStar) lines.push('- 準備一級：只用 TBCL 第 1 級裡標示「第1級」的詞；標示「第1*級」的詞（第 1 級後段）也算超綱。句子以 6 字左右的短句為主。');
   lines.push('- 本級學習者能力：' + L.performance);
   lines.push('- 文本類型：' + L.textType);
-  if (L.sentLenGuide) lines.push('- 建議平均句長：' + L.sentLenGuide + ' 字以內（編者經驗值）');
+  var guide = plan.sentLenGuide || L.sentLenGuide;
+  if (guide) lines.push('- 建議平均句長：' + guide + ' 字以內（編者經驗值）');
   lines.push('- 用途：' + P.label + '，可理解覆蓋率目標 ≥' + Math.round(P.threshold * 100) + '%');
   lines.push('- 學習者：' + (GR_LEARNERS[plan.learner] || GR_LEARNERS.adult_nonchar));
   lines.push('- 調整方向：' + GR_DIRECTION_LABEL[plan.direction] + '（目前估計適讀等級：' + estText + '）');
@@ -109,12 +111,12 @@ function buildUserPrompt_(draft, an, plan, ctx) {
     lines.push('- 目標級以內詞次覆蓋率 ' + an.target.withinPct + '%；含生詞、已學詞、專名後可理解覆蓋率 ' + an.target.effectivePct + '%');
     var must = an.target.above.filter(function (a) { return !a.glossed; });
     if (must.length) {
-      lines.push('- 必須處理的超綱詞（詞／TBCL 級／次數）：' + must.map(function (a) { return a.w + '／' + a.lv + '／' + a.n; }).join('、'));
+      lines.push('- 必須處理的超綱詞（詞／TBCL 級／次數）：' + must.map(function (a) { return a.w + '／' + (a.lvl || a.lv) + '／' + a.n; }).join('、'));
     } else {
       lines.push('- 沒有未處理的超綱詞。');
     }
     var kept = an.target.above.filter(function (a) { return a.glossed; });
-    if (kept.length) lines.push('- 超綱但已列為生詞或保留詞（可以保留）：' + kept.map(function (a) { return a.w + '（' + a.lv + '）'; }).join('、'));
+    if (kept.length) lines.push('- 超綱但已列為生詞或保留詞（可以保留）：' + kept.map(function (a) { return a.w + '（' + (a.lvl || a.lv) + '）'; }).join('、'));
     if (an.oov.length) lines.push('- 詞表未收錄的片段（可能是超綱詞、專名或錯字，請自行判斷）：' + an.oov.slice(0, 30).map(function (o) { return o.w; }).join('、'));
     if (plan.direction === 'up') {
       lines.push('- 第 ' + plan.target + ' 級詞語目前佔 ' + an.target.targetLevelShare + '% 詞次；請多用第 ' + plan.target + ' 級的詞語與句式。');
@@ -145,6 +147,11 @@ function buildUserPrompt_(draft, an, plan, ctx) {
     if (near.length) lines.push('【第 ' + Math.max(1, plan.target - 1) + '–' + plan.target + ' 級可用語法點（TBCL 語法點表）】' + near.slice(0, 250).map(function (x) { return x.name; }).join('、'));
   }
   if (plan.notes) lines.push('【教師補充指示】' + String(plan.notes).slice(0, 1000));
+
+  if (plan.segCount > 1) {
+    lines.push('');
+    lines.push('【分段】全文分成 ' + plan.segCount + ' 段同時處理，這是第 ' + (plan.segIndex + 1) + ' 段。只改這一段，不要補寫前後文；人物與用詞請與全文一致。');
+  }
 
   if (plan.round > 1 && plan.prevIssues) {
     lines.push('');

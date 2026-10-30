@@ -98,6 +98,7 @@ var GRAnalyzer = (function () {
     for (var r = start; r < rows.length; r++) {
       var row = rows[r];
       var lvl = parseLevel(row[li]);
+      var star = /[*＊]/.test(String(row[li] || '')) ? 1 : 0;   // 「第1*級」＝該級後段
       if (lvl === null || lvl > 7) continue;
       res.entries++;
       var forms = kind === 'char' ? chars(String(row[wi] || '').trim()).filter(isHan) : expandEntry(row[wi]);
@@ -111,7 +112,7 @@ var GRAnalyzer = (function () {
         var p = pys.length === parts.length && idx >= 0 ? pys[idx] : pys.join('/');
         var z = zys.length === parts.length && idx >= 0 ? zys[idx] : zys.join('/');
         var old = map[f];
-        if (!old || lvl < old.l) map[f] = { l: lvl, p: String(p || '').trim(), z: String(z || '').trim() };
+        if (!old || lvl < old.l || (lvl === old.l && old.s && !star)) map[f] = { l: lvl, s: star, p: String(p || '').trim(), z: String(z || '').trim() };
       });
     }
     var keys = Object.keys(map);
@@ -125,7 +126,7 @@ var GRAnalyzer = (function () {
     var lines = [lx.entries + '\t' + lx.maxLen];
     Object.keys(lx.map).forEach(function (w) {
       var v = lx.map[w];
-      lines.push(w + '\t' + v.l + '\t' + (v.p || '') + '\t' + (v.z || ''));
+      lines.push(w + '\t' + v.l + '\t' + (v.p || '') + '\t' + (v.z || '') + '\t' + (v.s ? 1 : 0));
     });
     return lines.join('\n');
   }
@@ -139,7 +140,7 @@ var GRAnalyzer = (function () {
     res.maxLen = parseInt(head[1], 10) || 1;
     for (var i = 1; i < lines.length; i++) {
       var c = lines[i].split('\t');
-      if (c[0]) res.map[c[0]] = { l: parseInt(c[1], 10), p: c[2] || '', z: c[3] || '' };
+      if (c[0]) res.map[c[0]] = { l: parseInt(c[1], 10), p: c[2] || '', z: c[3] || '', s: c[4] === '1' ? 1 : 0 };
     }
     res.forms = Object.keys(res.map).length;
     return res;
@@ -355,12 +356,12 @@ var GRAnalyzer = (function () {
    * analyze(text, ctx, opts)
    *  ctx  = { lex, chars, norms, phonic, lexLabel }（lex/chars 為 buildLeveled 結果，norms 為 prepareNorms 結果，phonic 為 preparePhonic 結果，可省略）
    *  opts = { target, purpose('extensive'|'intensive'), threshold, glossary, known, proper,
-   *           stripSpeakers(預設 true), sentLenGuide, top(預設 60), withSpans(預設 true) }
+   *           stripSpeakers(預設 true), sentLenGuide, strictStar（準備一級：1* 詞視為超綱）, top(預設 60), withSpans(預設 true) }
    */
   function analyze(text, ctx, opts) {
     opts = opts || {};
     ctx = ctx || {};
-    text = String(text || '').replace(/\r\n?/g, '\n');
+    text = stripSelectors(String(text || '')).replace(/\r\n?/g, '\n');
     var lexMap = ctx.lex && ctx.lex.map ? ctx.lex.map : dict();
     var lexLoaded = !!(ctx.lex && ctx.lex.forms > 0);
     var top = opts.top || 60;
@@ -377,11 +378,12 @@ var GRAnalyzer = (function () {
     // ---- 逐行切出 spans：w=TBCL 詞、g=生詞、k=已學詞、p=專名／保留、n=數詞、o=未收錄、x=非漢字、s=說話者標籤
     var spans = [];
     var body = [];          // 去除說話者標籤後的文本（計算句長、用語）
+    var speakers = opts.stripSpeakers !== false ? speakerNames(text) : dict();
     text.split('\n').forEach(function (line, li) {
       if (li > 0) { spans.push({ t: '\n', k: 'x' }); body.push('\n'); }
       if (opts.stripSpeakers !== false) {
         var m = SPEAKER_RE.exec(line);
-        if (m && line.charAt(m[0].length) !== '「' && m[0].length < line.length) {
+        if (m && speakers[labelName(m[0])] && line.charAt(m[0].length) !== '「' && m[0].length < line.length) {
           spans.push({ t: m[0], k: 's' });
           line = line.slice(m[0].length);
         }
@@ -411,8 +413,14 @@ var GRAnalyzer = (function () {
       seg.cut(run).forEach(function (w) {
         if (!has(w)) { oov += w; return; }
         pushOov();
+        var prev = spans[spans.length - 1];
+        if (prev && prev.k === 'n' && /^第/.test(prev.t) && /^[章節回課篇部集冊卷]$/.test(w)) {
+          prev.t += w;                              // 「第一章」「第三課」是章節編號，不檢查等級
+          return;
+        }
         if (lexMap[w]) {
           var sp = { t: w, k: 'w', l: lexMap[w].l, gl: !!(glossary[w] || known[w] || proper[w]) };
+          if (lexMap[w].s) sp.st = 1;
           var iv = ctx.phonic ? ivsFor(w, lexMap[w].p, ctx.phonic) : null;
           if (iv) sp.iv = iv;                       // ToneOZ 字型用：含多音字選擇器的字串
           spans.push(sp);
@@ -495,14 +503,16 @@ var GRAnalyzer = (function () {
 
     // ---- 目標等級檢核
     if (target) {
+      var strictStar = !!opts.strictStar && target === 1;
+      var isAbove = function (s) { return s.k === 'w' && (s.l > target || (strictStar && s.l === 1 && !!s.st)); };
       var within = 0;
-      for (lv = 1; lv <= target; lv++) within += byLv[lv];
       var above = dict();
       toks.forEach(function (s) {
-        if (s.k === 'w' && s.l > target) {
-          if (!above[s.t]) above[s.t] = { w: s.t, lv: s.l, n: 0, glossed: s.gl };
-          above[s.t].n++;
-        }
+        if (s.k !== 'w') return;
+        if (!isAbove(s)) { within++; return; }
+        s.ab = 1;                                   // 前端依此標朱筆
+        if (!above[s.t]) above[s.t] = { w: s.t, lv: s.l, lvl: s.l > target ? String(s.l) : s.l + '*', n: 0, glossed: s.gl };
+        above[s.t].n++;
       });
       var aboveList = Object.keys(above).map(function (w) {
         var a = above[w], e = lexMap[w] || {};
@@ -515,8 +525,10 @@ var GRAnalyzer = (function () {
       var effective = nTok ? (within + support + glossedTok) / nTok : 0;
       var status = estimate.level === null ? (estimate.beyond ? '偏難' : '無法判定')
                  : estimate.level > target ? '偏難' : estimate.level < target ? '偏易' : '合級';
+      if (strictStar && status !== '偏難' && unglossed.length && effective < threshold) status = '偏難';
       result.target = {
         level: target,
+        strictStar: strictStar,
         withinPct: nTok ? round1(within / nTok) : 0,
         effectivePct: round1(effective),
         threshold: round1(threshold),
@@ -583,6 +595,24 @@ var GRAnalyzer = (function () {
 
   // --------------------------------------------------------------------------- 工具
 
+  /** 移除 IVS／變體選擇器（從 ToneOZ 選音編輯器貼上的文字會帶有這些看不見的字元）。 */
+  function stripSelectors(s) { return s.replace(/[\u{E0100}-\u{E01EF}\uFE00-\uFE0F]/gu, ''); }
+
+  function labelName(label) { return label.replace(/[ \t\u3000：:]/g, ''); }
+
+  /** 說話者標籤：同一個名字在行首出現兩次以上，且不是「第一章」「老師說」這類敘述，才當成說話者。 */
+  function speakerNames(text) {
+    var cnt = dict(), ok = dict();
+    text.split('\n').forEach(function (line) {
+      var m = SPEAKER_RE.exec(line);
+      if (m) { var n = labelName(m[0]); cnt[n] = (cnt[n] || 0) + 1; }
+    });
+    Object.keys(cnt).forEach(function (n) {
+      if (cnt[n] >= 2 && !/^第.+[章節回課部篇]$|[說道問答講]$|^(注意|提示|說明|例如|答案|問題|題目|備註|附註|範例)$/.test(n)) ok[n] = true;
+    });
+    return ok;
+  }
+
   function setOf(arr) { var s = dict(); arr.forEach(function (w) { s[w] = true; }); return s; }
   function maxLenOf(s) { return Object.keys(s).reduce(function (m, w) { return Math.max(m, chars(w).length); }, 1); }
   function sum(a, b) { return a + b; }
@@ -618,6 +648,7 @@ var GRAnalyzer = (function () {
     splitPinyin: splitPinyin,
     pySyl: pySyl,
     analyze: analyze,
+    stripSelectors: stripSelectors,
     Segmenter: Segmenter,
     isHan: isHan
   };

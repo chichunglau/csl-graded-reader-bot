@@ -116,7 +116,7 @@ function builtinI18n_() {
 
 // ----------------------------------------------------------------------------- 大型快取
 
-function cacheKey_(kind) { return 'gr' + prop_('CACHE_VER', '1') + ':' + kind; }
+function cacheKey_(kind) { return 'gr2.' + prop_('CACHE_VER', '1') + ':' + kind; }   // gr2：詞表快取格式含 1* 子級
 
 /** 分塊寫入快取：每塊 30,000 個 UTF-16 單位，UTF-8 最多約 90KB，低於單值 100KB 上限。 */
 function cachePutBig_(key, str) {
@@ -161,8 +161,9 @@ function clearLexiconCache() {
 
 // ----------------------------------------------------------------------------- 每日配額
 
-/** 每呼叫一次 LLM 扣一次；超過 DAILY_LIMIT 就擋下，避免網頁被濫用而產生費用。 */
-function consumeQuota_() {
+/** 一次預留 n 次 LLM 呼叫（每段一次）；不夠就整批擋下，避免做到一半。 */
+function consumeQuota_(n) {
+  n = Math.max(1, n || 1);
   var limit = propInt_('DAILY_LIMIT');
   var key = 'quota_' + Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyyMMdd');
   var lock = LockService.getScriptLock();
@@ -170,12 +171,12 @@ function consumeQuota_() {
   try {
     var props = PropertiesService.getScriptProperties();
     var used = parseInt(props.getProperty(key) || '0', 10);
-    if (used >= limit) throw new Error('今日 LLM 呼叫次數已達上限（' + limit + ' 次），請明天再試，或請管理者調高 DAILY_LIMIT。');
+    if (used + n > limit) throw new Error('今日 AI 呼叫次數剩 ' + Math.max(0, limit - used) + ' 次，這次需要 ' + n + ' 次（上限 ' + limit + ' 次），請明天再試，或請管理者調高 DAILY_LIMIT。');
     if (used === 0) {
       props.getKeys().forEach(function (k) { if (k.indexOf('quota_') === 0 && k !== key) props.deleteProperty(k); });
     }
-    props.setProperty(key, String(used + 1));
-    return { used: used + 1, limit: limit };
+    props.setProperty(key, String(used + n));
+    return { used: used + n, limit: limit };
   } finally {
     lock.releaseLock();
   }
@@ -197,12 +198,12 @@ function appendLog_(source, action, req, res, ms) {
     var user = '';
     try { user = Session.getActiveUser().getEmail(); } catch (e) {}
     sh.appendRow([
-      new Date(), source, action, req.target || '', res.direction || '', req.purpose || '',
+      new Date(), source, action, (GR_TOCFL[req.stop] ? GR_TOCFL[req.stop].code + '／' : '') + (req.target || ''), res.direction || '', req.purpose || '',
       b.stats ? b.stats.hanChars : '',
       b.estimate ? (b.estimate.level || (b.estimate.beyond ? '>7' : '')) : '',
       a.estimate ? (a.estimate.level || (a.estimate.beyond ? '>7' : '')) : '',
       b.target ? b.target.effectivePct : '', a.target ? a.target.effectivePct : '',
-      res.rounds || 0, res.llm ? res.llm.provider : '', res.llm ? res.llm.model : '',
+      (res.rounds || 0) + (res.segments > 1 ? '×' + res.segments + '段' : ''), res.llm ? res.llm.provider : '', res.llm ? res.llm.model : '',
       res.llm ? res.llm.inputTokens : '', res.llm ? res.llm.outputTokens : '', ms, user
     ]);
   } catch (e) {

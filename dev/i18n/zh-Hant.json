@@ -223,5 +223,7 @@
   "level.choose": "選擇目標等級",
   "badge": "{code} {name}（TBCL {n}）",
   "tocfl.names": "準備一級,準備二級,入門級,基礎級,進階級,高階級,流利級,精通級",
-  "composer.hint": "Ctrl＋Enter 送出。"
+  "composer.hint": "Ctrl＋Enter 送出。",
+  "busy.queue": "使用人數較多，排隊中…（第 {n} 次重試）",
+  "level.novice1": "準備一級：不用標示 1* 的詞"
 }

@@ -223,5 +223,7 @@
   "level.choose": "Pilih level",
   "badge": "{code} · TBCL {n}",
   "tocfl.names": "Novice 1,Novice 2,Level 1,Level 2,Level 3,Level 4,Level 5,Level 6",
-  "composer.hint": "Tekan Ctrl+Enter untuk mengirim."
+  "composer.hint": "Tekan Ctrl+Enter untuk mengirim.",
+  "busy.queue": "Banyak pengguna, sedang antre… (coba ulang ke-{n})",
+  "level.novice1": "Novice 1: tanpa kata bertanda 1*"
 }

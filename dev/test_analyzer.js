@@ -6,7 +6,8 @@ const A = g.GRAnalyzer;
 const rows = fs.readFileSync(__dirname + '/fixtures/demo_lexicon.csv', 'utf8').trim().split('\n').map(l => l.split(','));
 const lex = A.buildLeveled(rows, 'word');
 const norms = A.prepareNorms(g.GR_ASSETS, []);
-const text = fs.readFileSync(__dirname + '/fixtures/sample.txt', 'utf8');
+// 與 Python 版比對用不含章節標題的本文（「第一章」在 JS 版視為章節編號，不檢查等級，這是刻意的差異）
+const text = fs.readFileSync(__dirname + '/fixtures/sample_body.txt', 'utf8');
 const proper = fs.readFileSync(__dirname + '/fixtures/proper.txt', 'utf8');
 const r = A.analyze(text, { lex, norms, lexLabel: 'demo' }, { target: 3, proper, sentLenGuide: 13, stripSpeakers: false });
 const py = JSON.parse(fs.readFileSync(__dirname + '/fixtures/py.json', 'utf8'));

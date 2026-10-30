@@ -223,5 +223,7 @@
   "level.choose": "Chọn cấp độ",
   "badge": "{code} · TBCL {n}",
   "tocfl.names": "Novice 1,Novice 2,Level 1,Level 2,Level 3,Level 4,Level 5,Level 6",
-  "composer.hint": "Nhấn Ctrl+Enter để gửi."
+  "composer.hint": "Nhấn Ctrl+Enter để gửi.",
+  "busy.queue": "Đang có nhiều người dùng, đang xếp hàng… (thử lại lần {n})",
+  "level.novice1": "Novice 1: không dùng từ đánh dấu 1*"
 }

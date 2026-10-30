@@ -39,13 +39,14 @@ var GRReport = (function () {
     p('# 分級讀本編修報告');
     p();
     h('定位摘要');
-    p('- 目標等級：' + grLevelLabel(res.target));
-    p('- 文本類型（第 ' + L.level + ' 級）：' + L.textType + (L.sentLenGuide ? '；建議平均句長 ' + L.sentLenGuide + ' 字以內（經驗值）' : ''));
+    p('- 目標等級：' + (res.levelLabel || grLevelLabel(res.target)));
+    var guide = (GR_TOCFL[res.tocfl] && GR_TOCFL[res.tocfl].sentLenGuide) || L.sentLenGuide;
+    p('- 文本類型（第 ' + L.level + ' 級）：' + L.textType + (guide ? '；建議平均句長 ' + guide + ' 字以內（經驗值）' : ''));
     p('- 用途：' + P.label + '，可理解覆蓋率門檻 ' + Math.round(P.threshold * 100) + '%（第二語言閱讀研究經驗值，非官方標準）');
     p('- 學習者：' + (GR_LEARNERS[res.learner] || GR_LEARNERS.adult_nonchar));
     p('- 詞表：' + (b.meta.lexiconLoaded ? (res.lexiconLabel || 'TBCL 詞語表') : '未載入（所有等級為推估）'));
     if (res.action === 'adjust') {
-      p('- 調整方向：' + res.directionLabel + '；改寫 ' + res.rounds + ' 輪；驗證結果：'
+      p('- 調整方向：' + res.directionLabel + '；改寫 ' + res.rounds + ' 輪' + (res.segments > 1 ? '（分 ' + res.segments + ' 段平行處理）' : '') + '；驗證結果：'
         + (!res.verified ? '未驗證（無詞表）' : res.passed ? '通過' : '未完全通過'));
       if (res.llm && res.llm.model) p('- 改寫模型：' + res.llm.provider + ' / ' + res.llm.model);
     }
@@ -56,7 +57,7 @@ var GRReport = (function () {
     metricsRows(b, a, hasAfter).forEach(function (r) { p('| ' + r[0] + ' | ' + r[1] + (hasAfter ? ' | ' + r[2] : '') + ' |'); });
     p();
     if (b.target && b.target.above.length) {
-      p('修訂前超綱詞：' + b.target.above.map(function (x) { return x.w + '（' + x.lv + '）×' + x.n; }).join('、'));
+      p('修訂前超綱詞：' + b.target.above.map(function (x) { return x.w + '（' + (x.lvl || x.lv) + '）×' + x.n; }).join('、'));
       p();
     }
     if (b.warnings && b.warnings.length) { b.warnings.forEach(function (w) { p('> ' + w); }); p(); }
@@ -82,7 +83,7 @@ var GRReport = (function () {
       p();
       p('| 詞 | TBCL 級 | 次數 | 漢語拼音 | 注音 | 詞類 | 英譯 | 來源／理由 |\n|---|---|---|---|---|---|---|---|');
       res.glossary.forEach(function (g) {
-        p('| ' + cell(g.w) + ' | ' + (g.lv || '未收錄') + ' | ' + g.n + ' | ' + cell(g.py) + ' | ' + cell(g.zy) + ' | ' + cell(g.pos) + ' | ' + cell(g.en) + ' | ' + cell(g.source + (g.reason ? '：' + g.reason : '')) + ' |');
+        p('| ' + cell(g.w) + ' | ' + (g.lvl || g.lv || '未收錄') + ' | ' + g.n + ' | ' + cell(g.py) + ' | ' + cell(g.zy) + ' | ' + cell(g.pos) + ' | ' + cell(g.en) + ' | ' + cell(g.source + (g.reason ? '：' + g.reason : '')) + ' |');
       });
       p();
     }

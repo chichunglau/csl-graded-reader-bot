@@ -164,6 +164,27 @@
     });
   }
 
+  /** 全班同時送出時，Apps Script 會回「同時執行過多」：等幾秒自動重試，最多 4 次。 */
+  var BUSY_RE = /simultaneous|too many|invoked too many|rate limit|同時|過多|429|529|overloaded/i;
+  function callRetry(name, req, onWait) {
+    var attempt = 0;
+    var once = function () {
+      return call(name, req).then(function (res) {
+        if (res && res.ok === false && BUSY_RE.test(res.error || '') && attempt < 4) return wait();
+        return res;
+      }, function (e) {
+        if (BUSY_RE.test(e.message || '') && attempt < 4) return wait();
+        throw e;
+      });
+    };
+    var wait = function () {
+      attempt++;
+      if (onWait) onWait(attempt);
+      return new Promise(function (r) { setTimeout(r, 2500 * attempt + Math.random() * 2500); }).then(once);
+    };
+    return once();
+  }
+
   // --------------------------------------------------------------------------- 工具
 
   function esc(s) {
@@ -183,6 +204,12 @@
   var BAND_KEY = { '基礎': 'band.basic', '進階': 'band.adv', '精熟': 'band.prof' };
   function bandName(b) { return BAND_KEY[b] ? t(BAND_KEY[b]) : b; }
   function tocflName(L) { return LANG === 'zh-Hant' ? L.tocfl + '（' + L.tocflEn + '）' : L.tocflEn + ' (' + L.tocfl + ')'; }
+  /** TOCFL 八級名稱：中文、日文顯示「準備一級（Novice 1）」，其他語言顯示代碼。 */
+  function tocflLabel(i) {
+    var st = STOPS[i] || STOPS[1], names = String(t('tocfl.names')).split(',');
+    return (LANG === 'zh-Hant' || LANG === 'ja') ? (names[i] || st.code) + ' ' + st.code : st.code;
+  }
+  function lvText(x) { return x.lvl || x.lv; }
   function estText(an) {
     if (!an || !an.meta.lexiconLoaded) return t('est.na');
     if (an.estimate.level) return t('level.n', { n: an.estimate.level });
@@ -250,10 +277,12 @@
     $('lvl-badge').className = 'badge band-' + st.band;
     if (L) {
       sl.setAttribute('aria-valuetext', t('level.aria', { n: n, band: bandName(L.band), tocfl: st.code, cefr: L.cefr }));
-      $('lvl-meta').textContent = t(L.sentLenGuide ? 'level.meta' : 'level.meta.nolen',
-        { words: fmt(L.cumWords), chars: fmt(L.cumChars), len: L.sentLenGuide, type: t('type.' + n) });
+      var T = (S.tocfl && S.tocfl[i]) || {};
+      var guide = T.sentLenGuide || L.sentLenGuide;
+      $('lvl-meta').textContent = t(guide ? 'level.meta' : 'level.meta.nolen',
+        { words: fmt(L.cumWords), chars: fmt(L.cumChars), len: guide, type: t('type.' + n) }) + (i === 0 ? '｜' + t('level.novice1') : '');
     }
-    var label = t('btn.adjust', { n: n });
+    var label = S.status && !S.status.llm.configured ? t('btn.analyze') : t('btn.adjust', { n: n });
     $('btn-adjust').setAttribute('aria-label', label);
     $('btn-adjust').title = label;
     if (live) return;
@@ -295,7 +324,7 @@
   function collect() {
     var pp = document.querySelector('input[name="purpose"]:checked');
     return {
-      text: $('text').value, target: S.target, mode: $('mode').value,
+      text: $('text').value, target: S.target, tocfl: S.stop, mode: $('mode').value,
       purpose: pp ? pp.value : 'extensive', learner: $('learner').value,
       protectedWords: $('protected').value, known: $('known').value, glossary: $('glossary').value,
       notes: $('notes').value, stripSpeakers: $('strip').checked
@@ -339,6 +368,7 @@
   function showError(msg) {
     $('error').hidden = !msg;
     $('error').textContent = msg || '';
+    if (msg && !S.last) $('result-pane').hidden = true;
   }
 
   // --------------------------------------------------------------------------- 執行
@@ -348,7 +378,8 @@
     if (!req.text.trim()) { showError(t('err.noText')); return; }
     showError('');
     setBusy(true, t('busy.analyze'));
-    call('uiAnalyze', req).then(handle, function (e) { setBusy(false); showError(e.message); });
+    callRetry('uiAnalyze', req, function (n) { $('busy-text').textContent = t('busy.queue', { n: n }); })
+      .then(handle, function (e) { setBusy(false); showError(e.message); });
   }
 
   function send() {
@@ -362,7 +393,8 @@
     if (hanCount(req.text) > max) { showError(t('err.tooLong', { max: fmt(max) })); return; }
     showError('');
     setBusy(true, t('busy.adjust', { n: req.target }), true);
-    call('uiAdjust', req).then(handle, function (e) { setBusy(false); showError(e.message); });
+    callRetry('uiAdjust', req, function (n) { $('busy-text').textContent = t('busy.queue', { n: n }); })
+      .then(handle, function (e) { setBusy(false); showError(e.message); });
   }
 
   function handle(res) {
@@ -399,7 +431,7 @@
 
   function renderVerdict(res, adjusted) {
     var b = res.before, a = res.after || b, L = level(res.target);
-    var target = t('verdict.target', { n: res.target, tocfl: tocflName(L) });
+    var target = t('verdict.target', { n: res.target, tocfl: res.tocfl !== undefined ? tocflLabel(res.tocfl) : tocflName(L) });
     var html = '';
     if (res.action === 'adjust') {
       var pill = !res.verified ? ['na', 'verdict.unverified'] : res.passed ? ['ok', 'verdict.passed'] : ['hard', 'verdict.notpassed'];
@@ -534,7 +566,10 @@
       var txt = markSimp(ivs && s.iv ? s.iv : s.t);
       switch (s.k) {
         case 'w':
-          if (s.l > target) return '<span class="' + (s.gl ? 'gl' : 'ab') + '" title="' + esc(t('tip.word', { w: s.t, n: s.l }) + (s.gl ? t('tip.glossed') : '')) + '">' + txt + '<sup>' + s.l + '</sup></span>';
+          if (s.ab || (s.ab === undefined && s.l > target)) {
+            var lvs = s.l <= target && s.st ? s.l + '*' : s.l;
+            return '<span class="' + (s.gl ? 'gl' : 'ab') + '" title="' + esc(t('tip.word', { w: s.t, n: lvs }) + (s.gl ? t('tip.glossed') : '')) + '">' + txt + '<sup>' + lvs + '</sup></span>';
+          }
           if (S.showTarget && s.l === target) return '<span class="tl" title="' + esc(t('tip.target', { n: s.l })) + '">' + txt + '</span>';
           return txt;
         case 'o': return '<span class="oov" title="' + esc(t('tip.oov')) + '">' + txt + '</span>';
@@ -563,7 +598,7 @@
       h += '<div class="sec"><h3 class="sec-h">' + esc(t('iss.above')) + '<span class="aside">' + esc(t('iss.above.aside')) + '</span></h3><div class="tablewrap"><table><thead><tr><th>'
         + esc(t('th.word')) + '</th><th>' + esc(t('th.lv')) + '</th><th class="n">' + esc(t('th.n')) + '</th><th>' + esc(t('th.ctx')) + '</th><th>' + esc(t('th.state')) + '</th></tr></thead><tbody>'
         + an.target.above.map(function (a) {
-          return '<tr><td class="w" lang="zh-Hant-TW">' + esc(a.w) + '</td><td><span class="lv above">' + a.lv + '</span></td><td class="n">' + a.n + '</td><td class="ctx" lang="zh-Hant-TW">' + esc(a.ctx) + '</td><td>'
+          return '<tr><td class="w" lang="zh-Hant-TW">' + esc(a.w) + '</td><td><span class="lv above">' + lvText(a) + '</span></td><td class="n">' + a.n + '</td><td class="ctx" lang="zh-Hant-TW">' + esc(a.ctx) + '</td><td>'
             + (a.glossed ? '<span class="cat">' + esc(t('st.glossed')) + '</span>' : '<span class="flag">' + esc(t('st.pending')) + '</span>') + '</td></tr>';
         }).join('') + '</tbody></table></div></div>';
     }
@@ -664,7 +699,7 @@
     if (res.action === 'adjust' && res.rounds > 0) return res.glossary || [];
     var an = res.before;
     return an.target ? an.target.above.map(function (a) {
-      return { w: a.w, lv: a.lv, n: a.n, py: a.py, zy: a.zy, pos: '', en: '', source: a.glossed ? '生詞表' : '待處理', reason: '' };
+      return { w: a.w, lv: a.lv, lvl: a.lvl, n: a.n, py: a.py, zy: a.zy, pos: '', en: '', source: a.glossed ? '生詞表' : '待處理', reason: '' };
     }) : [];
   }
 
@@ -677,14 +712,14 @@
       + '<p class="fine">' + esc(t(adjusted ? 'gl.note.adj' : 'gl.note.an')) + ' ' + esc(t('gl.note.py')) + '</p>'
       + '<div class="tablewrap"><table><thead><tr><th>' + esc(t('th.word')) + '</th><th>' + esc(t('th.lv')) + '</th><th class="n">' + esc(t('th.n')) + '</th><th>' + esc(t('th.py')) + '</th><th>' + esc(t('th.zy')) + '</th><th>' + esc(t('th.pos')) + '</th><th>' + esc(t('th.en')) + '</th><th>' + esc(t('th.src')) + '</th></tr></thead><tbody>'
       + rows.map(function (g) {
-        return '<tr><td class="w" lang="zh-Hant-TW">' + esc(g.w) + '</td><td>' + (g.lv ? '<span class="lv above">' + g.lv + '</span>' : '<span class="lv none">' + esc(t('gl.notIn')) + '</span>') + '</td><td class="n">' + g.n + '</td>'
+        return '<tr><td class="w" lang="zh-Hant-TW">' + esc(g.w) + '</td><td>' + (g.lv ? '<span class="lv above">' + lvText(g) + '</span>' : '<span class="lv none">' + esc(t('gl.notIn')) + '</span>') + '</td><td class="n">' + g.n + '</td>'
           + '<td>' + esc(g.py) + '</td><td lang="zh-Hant-TW">' + esc(g.zy) + '</td><td>' + esc(g.pos) + '</td><td lang="en">' + esc(g.en) + '</td><td>' + esc(src(g)) + (g.reason ? '：' + zh(esc(g.reason)) : '') + '</td></tr>';
       }).join('') + '</tbody></table></div>';
     $('p-gloss').innerHTML = h;
     $('copy-gl').addEventListener('click', function () {
       // 複製出去的表格是教材內容，欄名維持中文
       var tsv = ['詞\tTBCL級\t次數\t漢語拼音\t注音\t詞類\t英譯\t來源']
-        .concat(rows.map(function (g) { return [g.w, g.lv || '', g.n, g.py, g.zy, g.pos, g.en, g.source + (g.reason ? '：' + g.reason : '')].join('\t'); }));
+        .concat(rows.map(function (g) { return [g.w, lvText(g) || '', g.n, g.py, g.zy, g.pos, g.en, g.source + (g.reason ? '：' + g.reason : '')].join('\t'); }));
       copyText(tsv.join('\n'), $('copy-gl'));
     });
     $('add-gl').addEventListener('click', function () {
@@ -794,13 +829,14 @@
     bind();
     setLang(pickLang(''), false);
     setSize(prefs.size || store('gr-size') || 'm');
+    if (prefs.theme === 'auto') delete root.dataset.theme; else if (prefs.theme) root.dataset.theme = prefs.theme;
     if (window.GR_PREVIEW) {
       $('preview-note').hidden = false;
       $('preview-note').textContent = window.GR_PREVIEW.note;
     }
     call('uiBootstrap').then(function (b) {
       if (!b || !b.ok) { showError(b && b.error || t('err.init')); return; }
-      S.levels = b.levels; S.purposes = b.purposes; S.learners = b.learners; S.status = b.status;
+      S.levels = b.levels; S.tocfl = b.tocfl || []; S.purposes = b.purposes; S.learners = b.learners; S.status = b.status;
       if (b.ui) {
         OVR = b.ui.i18n || {};
         S.fonts = b.ui.fonts || S.fonts;
@@ -810,6 +846,7 @@
       S.target = saved >= 1 && saved <= 7 ? saved : 3;
       var savedStop = parseInt(store('gr-stop') || '', 10);
       if (!prefs.level && savedStop >= 0 && savedStop <= 7 && STOPS[savedStop].tbcl === S.target) S.stop = savedStop;
+      if (prefs.tocfl !== undefined) { S.stop = prefs.tocfl; S.target = STOPS[prefs.tocfl].tbcl; }
       setLang(LANG, false);
       renderLevels(); renderPurpose(); renderLearners(); renderStatus(b.status);
       setTarget(S.target, true);

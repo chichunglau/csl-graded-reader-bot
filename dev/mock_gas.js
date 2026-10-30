@@ -33,7 +33,7 @@ module.exports = function makeMocks({ sheets = {}, props = {}, fetchHandler }) {
         putAll: o => { for (const [k, v] of Object.entries(o)) { if (Buffer.byteLength(v) > 100 * 1024) throw new Error('value too big ' + Buffer.byteLength(v)); cache[k] = v; } },
         getAll: ks => { const o = {}; ks.forEach(k => { if (k in cache) o[k] = cache[k]; }); return o; } }) },
       SpreadsheetApp: { openById: () => ss, getActiveSpreadsheet: () => ss, create: () => ss, getUi: () => { throw new Error('no ui'); } },
-      UrlFetchApp: { fetch: (url, opt) => { log.fetches.push({ url, opt, body: JSON.parse(opt.payload) }); const r = fetchHandler(url, opt, log.fetches.length);
+      UrlFetchApp: { fetchAll(reqs) { log.batches = (log.batches || []).concat([reqs.length]); return reqs.map(r => this.fetch(r.url, r)); }, fetch: (url, opt) => { log.fetches.push({ url, opt, body: JSON.parse(opt.payload) }); const r = fetchHandler(url, opt, log.fetches.length);
         return { getResponseCode: () => r.code || 200, getContentText: () => JSON.stringify(r.body) }; } },
       Utilities: { formatDate: () => '20261022', sleep: () => {}, getUuid: () => 'aaaa-bbbb' },
       LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
