@@ -1,0 +1,18 @@
+[
+  { "code": "zh-Hant", "name": "繁體中文", "bcp": "zh-Hant-TW", "font": "" },
+  { "code": "en", "name": "English", "bcp": "en", "font": "" },
+  { "code": "ja", "name": "日本語", "bcp": "ja", "font": "Noto Sans JP" },
+  { "code": "ko", "name": "한국어", "bcp": "ko", "font": "Noto Sans KR" },
+  { "code": "vi", "name": "Tiếng Việt", "bcp": "vi", "font": "Noto Sans" },
+  { "code": "id", "name": "Bahasa Indonesia", "bcp": "id", "font": "" },
+  { "code": "th", "name": "ไทย", "bcp": "th", "font": "Noto Sans Thai" },
+  { "code": "fil", "name": "Filipino", "bcp": "fil", "font": "" },
+  { "code": "ms", "name": "Bahasa Melayu", "bcp": "ms", "font": "" },
+  { "code": "my", "name": "မြန်မာ", "bcp": "my", "font": "Noto Sans Myanmar" },
+  { "code": "km", "name": "ខ្មែរ", "bcp": "km", "font": "Noto Sans Khmer" },
+  { "code": "lo", "name": "ລາວ", "bcp": "lo", "font": "Noto Sans Lao" },
+  { "code": "hi", "name": "हिन्दी", "bcp": "hi", "font": "Noto Sans Devanagari" },
+  { "code": "ne", "name": "नेपाली", "bcp": "ne", "font": "Noto Sans Devanagari" },
+  { "code": "bn", "name": "বাংলা", "bcp": "bn", "font": "Noto Sans Bengali" },
+  { "code": "si", "name": "සිංහල", "bcp": "si", "font": "Noto Sans Sinhala" }
+]

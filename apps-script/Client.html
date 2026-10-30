@@ -1,0 +1,825 @@
+<script>
+(function () {
+  'use strict';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var root = document.documentElement;
+  var S = { levels: [], purposes: {}, learners: {}, status: null, target: 3, purpose: 'extensive',
+            last: null, view: 'after', showTarget: false, timer: null, font: 'std', size: 'm',
+            fonts: { pinyinUrl: '', zhuyinUrl: '' }, fontToken: 0, currentTab: 't-report' };
+
+  var SAMPLE = [
+    '第一章：夜市',
+    '安娜是從法國來的學生。今天晚上，她和朋友小美一起去士林夜市。',
+    '夜市裡人很多，非常擁擠。攤販賣的東西琳瑯滿目，空氣中都是食物的香味。',
+    '安娜迫不及待地想品嚐臺灣美食。她們排隊買了臭豆腐和珍珠奶茶。',
+    '小美說：「這家的臭豆腐很有名，你一定要吃吃看！」',
+    '吃完以後，她們坐出租車回宿舍。安娜觉得今天很开心。'
+  ].join('\n');
+  var SAMPLE_PROTECTED = '安娜、小美、士林夜市、法國';
+
+  // --------------------------------------------------------------------------- 介面語言
+
+  var I18N = window.GR_I18N || { langs: [{ code: 'zh-Hant', name: '繁體中文', bcp: 'zh-Hant-TW' }], strings: { 'zh-Hant': {} } };
+  var OVR = {};             // 試算表「介面翻譯」的覆蓋值
+  var LANG = 'zh-Hant';
+
+  function lookup(lang, k) {
+    if (OVR[lang] && OVR[lang][k]) return OVR[lang][k];
+    var s = I18N.strings[lang];
+    return s && s[k];
+  }
+  /** t('level.n', { n: 3 }) → 「第 3 級」；缺翻譯時依序退回英文、繁體中文。 */
+  function t(k, p) {
+    var s = lookup(LANG, k) || lookup('en', k) || lookup('zh-Hant', k) || k;
+    return p ? String(s).replace(/\{(\w+)\}/g, function (m, n) { return p[n] !== undefined && p[n] !== null ? p[n] : m; }) : s;
+  }
+  function langMeta(code) { for (var i = 0; i < I18N.langs.length; i++) if (I18N.langs[i].code === code) return I18N.langs[i]; return null; }
+
+  function pickLang(def) {
+    var cands = [];
+    if (window.GR_URL_PREFS && GR_URL_PREFS.lang) cands.push(GR_URL_PREFS.lang);
+    cands.push(store('gr-lang'));
+    if (def) cands.push(def);
+    (navigator.languages || [navigator.language || '']).forEach(function (l) { cands.push(l); });
+    var alias = { zh: 'zh-Hant', 'zh-TW': 'zh-Hant', 'zh-HK': 'zh-Hant', 'zh-MO': 'zh-Hant', 'zh-CN': 'zh-Hant', 'zh-SG': 'zh-Hant', tl: 'fil', 'in': 'id' };
+    for (var i = 0; i < cands.length; i++) {
+      var c = cands[i];
+      if (!c) continue;
+      if (langMeta(c)) return c;
+      if (alias[c]) return alias[c];
+      var base = String(c).split('-')[0];
+      if (alias[base]) return alias[base];
+      if (langMeta(base)) return base;
+    }
+    return 'zh-Hant';
+  }
+
+  function loadLangFont(meta) {
+    if (!meta || !meta.font || document.getElementById('lf-' + meta.code)) return;
+    var l = document.createElement('link');
+    l.rel = 'stylesheet'; l.id = 'lf-' + meta.code;
+    l.href = 'https://fonts.googleapis.com/css2?family=' + meta.font.replace(/ /g, '+') + ':wght@400;500;700&display=swap';
+    document.head.appendChild(l);
+  }
+
+  function applyStatic() {
+    document.querySelectorAll('[data-i18n]').forEach(function (el) { el.textContent = t(el.dataset.i18n); });
+    document.querySelectorAll('[data-i18n-ph]').forEach(function (el) { el.placeholder = t(el.dataset.i18nPh); });
+    document.querySelectorAll('[data-i18n-aria]').forEach(function (el) { el.setAttribute('aria-label', t(el.dataset.i18nAria)); });
+  }
+
+  function setLang(code, rerender) {
+    LANG = langMeta(code) ? code : 'zh-Hant';
+    var meta = langMeta(LANG);
+    root.lang = meta.bcp || LANG;
+    loadLangFont(meta);
+    root.style.setProperty('--f-body', (meta.font ? '"' + meta.font + '", ' : '') + '"Noto Sans TC", system-ui, "PingFang TC", "Microsoft JhengHei", sans-serif');
+    $('ui-lang').value = LANG;
+    applyStatic();
+    if (!rerender) return;
+    renderLevels(); setTarget(S.target, true); renderPurpose(); renderLearners();
+    if (S.status) renderStatus(S.status);
+    updateCount();
+    if (S.font !== 'std') setFont(S.font, true);
+    if (S.last) renderResult(true);
+  }
+
+  // --------------------------------------------------------------------------- 閱讀字體（ToneOZ）
+
+  var FONT_DEF = {
+    pinyin: { family: 'GR ToneOZ Pinyin', local: 'ToneOZ-Pinyin-Kai-Traditional', urlKey: 'pinyinUrl', nameKey: 'font.pinyin' },
+    zhuyin: { family: 'GR ToneOZ Zhuyin', local: 'ToneOZ-Zhuyin-Kai-Traditional', urlKey: 'zhuyinUrl', nameKey: 'font.zhuyin' }
+  };
+  function fontFormat(u) {
+    var m = /\.(woff2|woff|otf|ttf)(\?|#|$)/i.exec(u || '');
+    return { woff2: 'woff2', woff: 'woff', otf: 'opentype', ttf: 'truetype' }[m ? m[1].toLowerCase() : 'ttf'];
+  }
+  function ensureFace(d) {
+    if (document.getElementById('face-' + d.local)) return;
+    var url = S.fonts[d.urlKey];
+    var src = 'local("' + d.local + '")' + (url ? ', url("' + url + '") format("' + fontFormat(url) + '")' : '');
+    var st = document.createElement('style');
+    st.id = 'face-' + d.local;
+    st.textContent = '@font-face{font-family:"' + d.family + '";src:' + src + ';font-display:swap;}';
+    document.head.appendChild(st);
+  }
+
+  function setFont(key, quiet) {
+    if (!FONT_DEF[key]) key = 'std';
+    S.font = key;
+    root.dataset.font = key;
+    $('read-font').value = key;
+    store('gr-font', key);
+    var note = $('font-note');
+    if (key === 'std') { note.hidden = true; refreshReading(); return; }
+    var d = FONT_DEF[key], token = ++S.fontToken;
+    ensureFace(d);
+    var missing = function () {
+      if (token !== S.fontToken) return;
+      note.className = 'font-note warn';
+      note.innerHTML = esc(t('font.missing', { name: t(d.nameKey) }))
+        + ' <a href="https://toneoz.com/blog/download-fonts/" target="_blank" rel="noopener">' + esc(t('font.download')) + '</a>';
+    };
+    note.hidden = false; note.className = 'font-note';
+    if (!quiet) note.textContent = t('font.loading');
+    var probe = document.fonts && document.fonts.load ? document.fonts.load('32px "' + d.family + '"', '中了') : Promise.resolve([]);
+    probe.then(function (list) {
+      if (token !== S.fontToken) return;
+      if (list && list.length) { note.className = 'font-note'; note.textContent = t('font.ready', { name: t(d.nameKey) }); refreshReading(); }
+      else missing();
+    }, missing);
+    refreshReading();
+  }
+
+  function setSize(sz) {
+    S.size = ['s', 'm', 'l'].indexOf(sz) >= 0 ? sz : 'm';
+    root.dataset.size = S.size;
+    document.querySelectorAll('#read-size button').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.size === S.size); });
+    store('gr-size', S.size);
+  }
+
+  /** 換字體後重畫標記文本（ToneOZ 字型要用含多音字選擇器的版本）。 */
+  function refreshReading() {
+    if (!S.last) return;
+    renderReport();
+    if (S.last.action === 'adjust') renderRevised(S.last);
+  }
+
+  // --------------------------------------------------------------------------- 後端呼叫
+
+  function call(name, req) {
+    return new Promise(function (resolve, reject) {
+      if (window.google && google.script && google.script.run) {
+        google.script.run
+          .withSuccessHandler(resolve)
+          .withFailureHandler(function (e) { reject(e instanceof Error ? e : new Error(String(e && e.message || e))); })[name](req);
+      } else if (window.GR_PREVIEW) {
+        setTimeout(function () {
+          try { resolve(window.GR_PREVIEW[name](req)); } catch (e) { reject(e); }
+        }, name === 'uiAdjust' ? 1200 : 150);
+      } else {
+        reject(new Error(t('err.backend')));
+      }
+    });
+  }
+
+  // --------------------------------------------------------------------------- 工具
+
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function fmt(n) { return (n === null || n === undefined || n === '') ? '—' : Number(n).toLocaleString('en-US'); }
+  function hanCount(s) { var m = String(s || '').match(/\p{Script=Han}/gu); return m ? m.length : 0; }
+  function level(n) { for (var i = 0; i < S.levels.length; i++) if (S.levels[i].level === n) return S.levels[i]; return null; }
+  function modelName(id) {
+    if (!id) return '';
+    var p = String(id).split('-');
+    if (p[0] !== 'claude' || p.length < 3) return id;
+    return 'Claude ' + p[1].charAt(0).toUpperCase() + p[1].slice(1) + ' ' + p.slice(2).join('.');
+  }
+  function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+  var BAND_KEY = { '基礎': 'band.basic', '進階': 'band.adv', '精熟': 'band.prof' };
+  function bandName(b) { return BAND_KEY[b] ? t(BAND_KEY[b]) : b; }
+  function tocflName(L) { return LANG === 'zh-Hant' ? L.tocfl + '（' + L.tocflEn + '）' : L.tocflEn + ' (' + L.tocfl + ')'; }
+  function estText(an) {
+    if (!an || !an.meta.lexiconLoaded) return t('est.na');
+    if (an.estimate.level) return t('level.n', { n: an.estimate.level });
+    return an.estimate.beyond ? t('est.beyond') : '—';
+  }
+  var CAT_KEY = { '詞彙': 'cat.vocab', '語法': 'cat.grammar', '句長': 'cat.length', '用語': 'cat.term', '字形': 'cat.glyph', '自然度': 'cat.natural', '內容': 'cat.content', '其他': 'cat.other' };
+  var SRC_KEY = { '模型保留': 'src.model', '生詞表': 'src.gloss', '未處理': 'src.pending', '待處理': 'src.pending' };
+  function zh(html) { return '<span lang="zh-Hant-TW">' + html + '</span>'; }
+
+  function copyText(text, btn) {
+    var done = function () {
+      var c = btn.parentNode.querySelector('.copied');
+      if (!c) { c = document.createElement('span'); c.className = 'copied'; btn.after(c); }
+      c.textContent = t('copy.done');
+      setTimeout(function () { c.textContent = ''; }, 2000);
+    };
+    var fallback = function () {
+      var ta = document.createElement('textarea');
+      ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) { btn.textContent = t('copy.manual'); }
+      ta.remove();
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+    else fallback();
+  }
+
+  // --------------------------------------------------------------------------- 對標滑桿（TOCFL 八級 → TBCL）
+
+  // 華測會與國教院整體對應：準備一、二級 → TBCL 1；入門級 A1 → 2；基礎級 A2 → 3；進階級 B1 → 4；高階級 B2 → 5；流利級 C1 → 6；精通級 C2 → 7
+  var STOPS = [
+    { code: 'Novice 1', tbcl: 1, band: 'n' }, { code: 'Novice 2', tbcl: 1, band: 'n' },
+    { code: 'A1', tbcl: 2, band: 'a' }, { code: 'A2', tbcl: 3, band: 'a' },
+    { code: 'B1', tbcl: 4, band: 'b' }, { code: 'B2', tbcl: 5, band: 'b' },
+    { code: 'C1', tbcl: 6, band: 'c' }, { code: 'C2', tbcl: 7, band: 'c' }
+  ];
+  function stopOf(n) { return n <= 1 ? 1 : Math.min(7, n); }
+  function stopPos(i) { return 'calc(11px + ' + (i / 7) + ' * (100% - 22px))'; }
+
+  function renderLevels() {
+    var row = function (fn, cls) {
+      return STOPS.map(function (st, i) {
+        return '<span class="tk ' + cls + ' band-' + st.band + '" data-stop="' + i + '" style="left:' + stopPos(i) + '">' + esc(fn(st, i)) + '</span>';
+      }).join('');
+    };
+    $('tk-code').innerHTML = row(function (st) { return st.code; }, 'code');
+    $('tk-num').innerHTML = row(function (st) { return st.tbcl; }, 'num');
+    setStop(S.stop === undefined ? stopOf(S.target) : S.stop, true);
+  }
+
+  /** 由 TBCL 等級設定滑桿（保留使用者在準備一、二級之間的選擇）。 */
+  function setTarget(n, live) {
+    setStop(S.stop !== undefined && STOPS[S.stop].tbcl === n ? S.stop : stopOf(n), live);
+  }
+
+  function setStop(i, live) {
+    i = Math.max(0, Math.min(7, i | 0));
+    var st = STOPS[i], n = st.tbcl, L = level(n), sl = $('level');
+    S.stop = i; S.target = n;
+    sl.value = i;
+    sl.style.setProperty('--fill', stopPos(i));
+    document.querySelectorAll('.ruler .tk').forEach(function (x) { x.classList.toggle('on', +x.dataset.stop === i); });
+    var names = String(t('tocfl.names')).split(',');
+    $('lvl-badge').textContent = t('badge', { code: st.code, name: names[i] || st.code, n: n });
+    $('lvl-badge').className = 'badge band-' + st.band;
+    if (L) {
+      sl.setAttribute('aria-valuetext', t('level.aria', { n: n, band: bandName(L.band), tocfl: st.code, cefr: L.cefr }));
+      $('lvl-meta').textContent = t(L.sentLenGuide ? 'level.meta' : 'level.meta.nolen',
+        { words: fmt(L.cumWords), chars: fmt(L.cumChars), len: L.sentLenGuide, type: t('type.' + n) });
+    }
+    var label = t('btn.adjust', { n: n });
+    $('btn-adjust').setAttribute('aria-label', label);
+    $('btn-adjust').title = label;
+    if (live) return;
+    store('gr-target', String(n)); store('gr-stop', String(i));
+    if (S.last && S.last.action === 'analyze' && $('text').value.trim()) doAnalyze();
+  }
+
+  // --------------------------------------------------------------------------- 表單
+
+  function renderPurpose() {
+    var checked = S.purpose;
+    $('purpose').innerHTML = '<legend class="label">' + esc(t('purpose.legend')) + '</legend>' + Object.keys(S.purposes).map(function (k) {
+      var p = S.purposes[k];
+      return '<label class="radio" for="pp-' + k + '"><input type="radio" name="purpose" id="pp-' + k + '" value="' + k + '"'
+        + (k === checked ? ' checked' : '') + '> ' + esc(t('purpose.opt', { label: t('purpose.' + k), pct: Math.round(p.threshold * 100) })) + '</label>';
+    }).join('');
+  }
+
+  function renderLearners() {
+    var cur = $('learner').value || 'adult_nonchar';
+    $('learner').innerHTML = Object.keys(S.learners).map(function (k) {
+      return '<option value="' + k + '"' + (k === cur ? ' selected' : '') + '>' + esc(t('learner.' + k)) + '</option>';
+    }).join('');
+  }
+
+  function renderLangs() {
+    $('ui-lang').innerHTML = I18N.langs.map(function (l) {
+      return '<option value="' + l.code + '" lang="' + esc(l.bcp) + '">' + esc(l.name) + '</option>';
+    }).join('');
+  }
+
+  function updateCount() {
+    var n = hanCount($('text').value);
+    var max = S.status && S.status.limits ? S.status.limits.maxChars : 3000;
+    $('count').textContent = t('count', { n: fmt(n), max: fmt(max) });
+    $('count').classList.toggle('over', n > max);
+  }
+
+  function collect() {
+    var pp = document.querySelector('input[name="purpose"]:checked');
+    return {
+      text: $('text').value, target: S.target, mode: $('mode').value,
+      purpose: pp ? pp.value : 'extensive', learner: $('learner').value,
+      protectedWords: $('protected').value, known: $('known').value, glossary: $('glossary').value,
+      notes: $('notes').value, stripSpeakers: $('strip').checked
+    };
+  }
+
+  function renderStatus(st) {
+    var chips = [];
+    if (window.GR_PREVIEW) chips.push('<span class="chip warn"><span class="dot"></span>' + esc(t('status.preview')) + '</span>');
+    chips.push(st.lexicon.loaded
+      ? '<span class="chip ok" title="' + esc(st.lexicon.label) + '"><span class="dot"></span>' + esc(t('status.lex', { n: fmt(st.lexicon.entries) })) + '</span>'
+      : '<span class="chip warn"><span class="dot"></span>' + esc(t('status.nolex')) + '</span>');
+    chips.push(st.llm.configured
+      ? '<span class="chip ok"><span class="dot"></span>' + esc(t('status.ai', { m: modelName(st.llm.model) })) + '</span>'
+      : '<span class="chip warn" title="' + esc(st.llm.hint) + '"><span class="dot"></span>' + esc(t('status.noai')) + '</span>');
+    if (st.llm.configured) chips.push('<span class="chip num"><span class="dot"></span>' + esc(t('status.quota', { u: st.quota.used, l: st.quota.limit })) + '</span>');
+    $('status').innerHTML = chips.join('');
+    $('ver').textContent = st.version;
+    $('adjust-hint').textContent = (st.llm.configured ? t('hint.adjust', { r: st.limits.maxRounds }) : t('hint.noai')) + ' ' + t('composer.hint');
+  }
+
+  // --------------------------------------------------------------------------- 忙碌與錯誤
+
+  function setBusy(on, text, timed) {
+    $('busy').hidden = !on;
+    $('result-pane').setAttribute('aria-busy', on);
+    $('btn-analyze').disabled = on;
+    $('btn-adjust').disabled = on;
+    if (on) $('result-pane').hidden = false;
+    clearInterval(S.timer);
+    if (on) {
+      $('busy-text').textContent = text;
+      $('busy-time').textContent = '';
+      if (timed) {
+        var t0 = Date.now();
+        S.timer = setInterval(function () { $('busy-time').textContent = t('busy.elapsed', { s: Math.round((Date.now() - t0) / 1000) }); }, 1000);
+      }
+    }
+  }
+
+  function showError(msg) {
+    $('error').hidden = !msg;
+    $('error').textContent = msg || '';
+  }
+
+  // --------------------------------------------------------------------------- 執行
+
+  function doAnalyze() {
+    var req = collect();
+    if (!req.text.trim()) { showError(t('err.noText')); return; }
+    showError('');
+    setBusy(true, t('busy.analyze'));
+    call('uiAnalyze', req).then(handle, function (e) { setBusy(false); showError(e.message); });
+  }
+
+  function send() {
+    if (S.status && S.status.llm.configured) doAdjust(); else doAnalyze();
+  }
+
+  function doAdjust() {
+    var req = collect();
+    if (!req.text.trim()) { showError(t('err.noText')); return; }
+    var max = S.status.limits.maxChars;
+    if (hanCount(req.text) > max) { showError(t('err.tooLong', { max: fmt(max) })); return; }
+    showError('');
+    setBusy(true, t('busy.adjust', { n: req.target }), true);
+    call('uiAdjust', req).then(handle, function (e) { setBusy(false); showError(e.message); });
+  }
+
+  function handle(res) {
+    setBusy(false);
+    if (!res || !res.ok) { showError(res && res.error || t('err.unknown')); return; }
+    S.last = res;
+    S.view = res.action === 'adjust' && res.rounds > 0 ? 'after' : 'before';
+    $('result').hidden = false;
+    renderResult(false);
+    if (res.action === 'adjust') {
+      call('uiBootstrap').then(function (b) { if (b && b.ok) { S.status = b.status; renderStatus(b.status); } });
+    }
+  }
+
+  // --------------------------------------------------------------------------- 結果
+
+  function renderResult(keepTab) {
+    var res = S.last;
+    var adjusted = res.action === 'adjust' && res.rounds > 0;
+    renderVerdict(res, adjusted);
+    renderReport();
+    $('t-revised').disabled = res.action !== 'adjust';
+    $('t-changes').disabled = !adjusted;
+    $('n-changes').textContent = adjusted ? res.changes.length : '';
+    var gl = glossaryRows(res);
+    $('n-gloss').textContent = gl.length || '';
+    if (res.action === 'adjust') renderRevised(res);
+    renderChanges(res);
+    renderGlossary(gl, res);
+    renderMd(res);
+    var tab = keepTab && !$(S.currentTab).disabled ? S.currentTab : (res.action === 'adjust' ? 't-revised' : 't-report');
+    selectTab(tab);
+  }
+
+  function renderVerdict(res, adjusted) {
+    var b = res.before, a = res.after || b, L = level(res.target);
+    var target = t('verdict.target', { n: res.target, tocfl: tocflName(L) });
+    var html = '';
+    if (res.action === 'adjust') {
+      var pill = !res.verified ? ['na', 'verdict.unverified'] : res.passed ? ['ok', 'verdict.passed'] : ['hard', 'verdict.notpassed'];
+      html += '<div class="verdict-line"><span class="pill ' + pill[0] + '">' + esc(t(pill[1])) + '</span>'
+        + '<span class="verdict-text">' + esc(t('verdict.level')) + ' <b>' + esc(estText(b)) + '</b> → <b>' + esc(estText(a)) + '</b>｜' + esc(target) + '</span></div>'
+        + '<p class="fine">' + (adjusted
+          ? esc(t('verdict.rounds', { dir: t('dir.' + res.direction), r: res.rounds })) + (res.llm.model ? '・' + esc(modelName(res.llm.model)) : '')
+          : zh(esc(res.summary))) + '</p>';
+    } else {
+      var st = b.target ? b.target.status : '無法判定';
+      var key = { '偏難': ['hard', 'st.hard'], '偏易': ['easy', 'st.easy'], '合級': ['ok', 'st.ok'] }[st] || ['na', 'st.na'];
+      html += '<div class="verdict-line"><span class="pill ' + key[0] + '">' + esc(t(key[1])) + '</span>'
+        + '<span class="verdict-text">' + esc(t('verdict.est')) + ' <b>' + esc(estText(b)) + '</b>｜' + esc(target) + '</span></div>'
+        + '<p class="fine">' + esc(t('verdict.suggest', { dir: t('dir.' + res.direction) }))
+        + (S.status && S.status.llm.configured ? esc(t('verdict.suggestBtn', { btn: t('btn.adjust', { n: res.target }) })) : '') + '</p>';
+    }
+    html += '<p class="statement" lang="zh-Hant-TW">' + esc(res.statement) + '</p>';
+    $('verdict').innerHTML = html;
+  }
+
+  function kpis(an, target) {
+    var L = level(target);
+    if (!an.meta.lexiconLoaded) {
+      return '<div class="kpis"><div class="kpi"><span class="k">' + esc(t('kpi.est')) + '</span><span class="v">—</span><span class="d">' + esc(t('kpi.nolex')) + '</span></div>'
+        + '<div class="kpi"><span class="k">' + esc(t('kpi.han')) + '</span><span class="v num">' + fmt(an.stats.hanChars) + '</span><span class="d">' + esc(t('kpi.tokens', { n: fmt(an.stats.tokens) })) + '</span></div>'
+        + sentKpi(an, L) + '<div class="kpi"><span class="k">' + esc(t('kpi.simp')) + '</span><span class="v num">' + (an.norms ? an.norms.simplified.length : '—') + '</span><span class="d">' + esc(t('kpi.terms', { n: an.norms ? an.norms.terms.length : '—' })) + '</span></div></div>';
+    }
+    var tg = an.target, e = an.estimate;
+    return '<div class="kpis">'
+      + '<div class="kpi ' + (e.level === target ? 'good' : 'bad') + '"><span class="k">' + esc(t('kpi.est')) + '</span><span class="v">' + (e.level ? esc(t('level.n', { n: e.level })) : (e.beyond ? '7+' : '—')) + '</span>'
+      + '<span class="d">' + esc(t('kpi.est.d', { t: e.threshold })) + '</span></div>'
+      + '<div class="kpi ' + (tg.pass ? 'good' : 'bad') + '"><span class="k">' + esc(t('kpi.cov')) + '</span><span class="v num">' + tg.effectivePct + '<small>%</small></span>'
+      + '<span class="d num">' + esc(t('kpi.cov.d', { t: tg.threshold, w: tg.withinPct })) + '</span></div>'
+      + '<div class="kpi ' + (tg.aboveUnglossedTypes ? 'bad' : 'good') + '"><span class="k">' + esc(t('kpi.above')) + '</span><span class="v num">' + tg.aboveUnglossedTypes + '</span>'
+      + '<span class="d num">' + esc(t('kpi.above.d', { n: tg.aboveUnglossedTokens, p: tg.newWordsPer100 })) + '</span></div>'
+      + sentKpi(an, L) + '</div>';
+  }
+  function sentKpi(an, L) {
+    var g = L && L.sentLenGuide, over = g && an.sentences.mean > g;
+    return '<div class="kpi ' + (g ? (over ? 'bad' : 'good') : '') + '"><span class="k">' + esc(t('kpi.sent')) + '</span><span class="v num">' + an.sentences.mean + '</span>'
+      + '<span class="d num">' + esc(g ? t('kpi.sent.d', { g: g, m: an.sentences.max }) : t('kpi.sent.d2', { m: an.sentences.max })) + '</span></div>';
+  }
+
+  // 覆蓋率曲線（SVG，單一數列＋門檻線＋目標線）
+  function curveSvg(an, target) {
+    var W = 320, H = 176, l = 34, r = 14, tp = 18, b = 26;
+    var pts = an.estimate.curve, thr = an.estimate.threshold;
+    var lo = Math.min.apply(null, pts.map(function (p) { return p.cov; }).concat([thr - 4]));
+    var ymin = Math.max(0, Math.floor((lo - 2) / 10) * 10), ymax = 100;
+    var step = ymax - ymin > 40 ? 20 : ymax - ymin > 20 ? 10 : 5;
+    var x = function (lv) { return l + (lv - 1) * (W - l - r) / 6; };
+    var y = function (v) { return tp + (ymax - v) * (H - tp - b) / (ymax - ymin); };
+    var g = '';
+    for (var v = ymin; v <= ymax; v += step) {
+      g += '<line class="gridline" x1="' + l + '" x2="' + (W - r) + '" y1="' + y(v) + '" y2="' + y(v) + '"></line>'
+         + '<text x="' + (l - 6) + '" y="' + (y(v) + 4) + '" text-anchor="end">' + v + '%</text>';
+    }
+    for (var lv = 1; lv <= 7; lv++) g += '<text x="' + x(lv) + '" y="' + (H - 8) + '" text-anchor="middle">' + lv + '</text>';
+    var d = pts.map(function (p, i) { return (i ? 'L' : 'M') + x(p.level).toFixed(1) + ' ' + y(p.cov).toFixed(1); }).join(' ');
+    var area = d + ' L' + x(7) + ' ' + y(ymin) + ' L' + x(1) + ' ' + y(ymin) + ' Z';
+    var est = an.estimate.level;
+    var dots = pts.map(function (p) {
+      return '<circle class="pt' + (p.level === est ? ' est' : '') + '" cx="' + x(p.level) + '" cy="' + y(p.cov) + '" r="' + (p.level === est ? 5 : 3.5) + '"></circle>';
+    }).join('');
+    var lab = est ? pts[est - 1] : pts[6];
+    var labRight = lab.level < 6;
+    var labX = x(lab.level) + (labRight ? 8 : -8);
+    var hits = pts.map(function (p) {
+      var w = (W - l - r) / 6;
+      return '<rect class="hit" data-lv="' + p.level + '" data-cov="' + p.cov + '" x="' + (x(p.level) - w / 2) + '" y="' + tp + '" width="' + w + '" height="' + (H - tp - b) + '"></rect>';
+    }).join('');
+    return '<div class="curve" id="curve"><svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(t('chart.curve.aria')) + '">'
+      + '<g class="axis">' + g + '</g>'
+      + '<line class="tgt" x1="' + x(target) + '" x2="' + x(target) + '" y1="' + tp + '" y2="' + (H - b) + '"></line>'
+      + '<text class="tgt-lbl" x="' + x(target) + '" y="' + (tp - 6) + '" text-anchor="middle">' + esc(t('chart.tgt', { n: target })) + '</text>'
+      + '<path class="area" d="' + area + '"></path><path class="line" d="' + d + '"></path>'
+      + '<line class="thr" x1="' + l + '" x2="' + (W - r) + '" y1="' + y(thr) + '" y2="' + y(thr) + '"></line>'
+      + '<text class="thr-lbl" x="' + (l + 4) + '" y="' + (y(thr) - 5) + '">' + esc(t('chart.thr', { t: thr })) + '</text>'
+      + '<line class="xh" id="xh" x1="0" x2="0" y1="' + tp + '" y2="' + (H - b) + '" visibility="hidden"></line>'
+      + dots
+      + '<text class="tgt-lbl" x="' + labX + '" y="' + (y(lab.cov) + 16) + '" text-anchor="' + (labRight ? 'start' : 'end') + '">' + lab.cov + '%</text>'
+      + hits + '</svg><div class="tip" id="curve-tip" hidden></div></div>';
+  }
+
+  function bindCurve() {
+    var box = $('curve'); if (!box) return;
+    var tip = $('curve-tip'), xh = $('xh'), svg = box.querySelector('svg');
+    box.querySelectorAll('.hit').forEach(function (h) {
+      var show = function () {
+        var rect = svg.getBoundingClientRect(), vb = svg.viewBox.baseVal;
+        var cx = +h.getAttribute('x') + +h.getAttribute('width') / 2;
+        xh.setAttribute('x1', cx); xh.setAttribute('x2', cx); xh.setAttribute('visibility', 'visible');
+        tip.textContent = t('chart.tip', { n: h.dataset.lv, c: h.dataset.cov });
+        tip.style.left = (cx / vb.width * rect.width) + 'px';
+        tip.style.top = '18px';
+        tip.hidden = false;
+      };
+      h.addEventListener('mouseenter', show);
+      h.addEventListener('touchstart', show, { passive: true });
+      h.addEventListener('mouseleave', function () { tip.hidden = true; xh.setAttribute('visibility', 'hidden'); });
+    });
+  }
+
+  function distRows(an, target) {
+    var rows = an.levelDist.map(function (d) {
+      return { name: t('level.n', { n: d.level }), tag: d.level > target ? t('chart.above') : '', pct: d.pct, n: d.tokens,
+               cls: d.level > target ? 'above' : '', title: t('chart.lv.title', { n: d.level, band: bandName(d.band), tok: d.tokens, types: d.types }) };
+    });
+    var s = an.support, sup = s.glossary + s.known + s.proper + s.numerals, tok = an.stats.tokens || 1;
+    var oovN = an.oov.reduce(function (m, o) { return m + o.n; }, 0);
+    rows.push({ name: t('chart.support'), pct: Math.round(1000 * sup / tok) / 10, n: sup, cls: 'muted', sep: true,
+                title: t('chart.support.title', { p: s.proper, g: s.glossary, k: s.known, num: s.numerals }) });
+    rows.push({ name: t('chart.oov'), pct: Math.round(1000 * oovN / tok) / 10, n: oovN, cls: 'muted', title: t('chart.oov.title') });
+    var max = Math.max.apply(null, rows.map(function (r) { return r.pct; }).concat([1]));
+    return '<div class="dist" role="table" aria-label="' + esc(t('chart.dist')) + '">' + rows.map(function (r) {
+      return '<div class="drow' + (r.sep ? ' sep' : '') + '" role="row" title="' + esc(r.title) + '">'
+        + '<span class="name" role="cell">' + esc(r.name) + (r.tag ? '<span class="tag">' + esc(r.tag) + '</span>' : '') + '</span>'
+        + '<span class="track" role="cell"><span class="bar ' + r.cls + (r.n ? '' : ' zero') + '" style="width:' + (r.n ? Math.max(1.5, 100 * r.pct / max) : 0) + '%;display:block"></span></span>'
+        + '<span class="val" role="cell">' + r.pct + '%｜' + r.n + '</span></div>';
+    }).join('') + '</div>';
+  }
+
+  /** 標記文本。用 ToneOZ 字型時改用含多音字選擇器（IVS）的字串，讓多音字顯示 TBCL 參考讀音。 */
+  function spansHtml(an, target) {
+    if (!an.spans) return '';
+    var simp = {}, ivs = S.font !== 'std';
+    (an.norms ? an.norms.simplified : []).forEach(function (x) { simp[x.c] = true; });
+    var markSimp = function (s) {
+      return Array.from(s).map(function (c) { return simp[c] ? '<span class="simp" title="' + esc(t('tip.simp')) + '">' + esc(c) + '</span>' : esc(c); }).join('');
+    };
+    return an.spans.map(function (s) {
+      var txt = markSimp(ivs && s.iv ? s.iv : s.t);
+      switch (s.k) {
+        case 'w':
+          if (s.l > target) return '<span class="' + (s.gl ? 'gl' : 'ab') + '" title="' + esc(t('tip.word', { w: s.t, n: s.l }) + (s.gl ? t('tip.glossed') : '')) + '">' + txt + '<sup>' + s.l + '</sup></span>';
+          if (S.showTarget && s.l === target) return '<span class="tl" title="' + esc(t('tip.target', { n: s.l })) + '">' + txt + '</span>';
+          return txt;
+        case 'o': return '<span class="oov" title="' + esc(t('tip.oov')) + '">' + txt + '</span>';
+        case 'p': return '<span class="pn" title="' + esc(t('tip.proper')) + '">' + txt + '</span>';
+        case 'g': return '<span class="pn" title="' + esc(t('tip.gloss')) + '">' + txt + '</span>';
+        case 'k': return '<span class="pn" title="' + esc(t('tip.known')) + '">' + txt + '</span>';
+        case 's': return '<span class="sp" title="' + esc(t('tip.speaker')) + '">' + txt + '</span>';
+        default: return txt;
+      }
+    }).join('');
+  }
+  function ivsText(an) { return (an.spans || []).map(function (s) { return s.iv || s.t; }).join(''); }
+
+  function legendHtml() {
+    return '<div class="legend"><span><span class="sw ab" lang="zh-Hant-TW">擁擠<sup>5</sup></span>' + esc(t('legend.above')) + '</span>'
+      + '<span><span class="sw gl" lang="zh-Hant-TW">夜市</span>' + esc(t('legend.glossed')) + '</span>'
+      + '<span><span class="sw oov" lang="zh-Hant-TW">出租</span>' + esc(t('legend.oov')) + '</span>'
+      + '<span><span class="sw pn" lang="zh-Hant-TW">安娜</span>' + esc(t('legend.proper')) + '</span>'
+      + '<label class="check" for="show-tl"><input type="checkbox" id="show-tl"' + (S.showTarget ? ' checked' : '') + '> ' + esc(t('legend.showTarget')) + '</label></div>';
+  }
+
+  function issuesHtml(an) {
+    var h = '';
+    if (an.warnings && an.warnings.length) h += '<ul class="notes" lang="zh-Hant-TW">' + an.warnings.map(function (w) { return '<li class="warn">' + esc(w) + '</li>'; }).join('') + '</ul>';
+    if (an.target && an.target.above.length) {
+      h += '<div class="sec"><h3 class="sec-h">' + esc(t('iss.above')) + '<span class="aside">' + esc(t('iss.above.aside')) + '</span></h3><div class="tablewrap"><table><thead><tr><th>'
+        + esc(t('th.word')) + '</th><th>' + esc(t('th.lv')) + '</th><th class="n">' + esc(t('th.n')) + '</th><th>' + esc(t('th.ctx')) + '</th><th>' + esc(t('th.state')) + '</th></tr></thead><tbody>'
+        + an.target.above.map(function (a) {
+          return '<tr><td class="w" lang="zh-Hant-TW">' + esc(a.w) + '</td><td><span class="lv above">' + a.lv + '</span></td><td class="n">' + a.n + '</td><td class="ctx" lang="zh-Hant-TW">' + esc(a.ctx) + '</td><td>'
+            + (a.glossed ? '<span class="cat">' + esc(t('st.glossed')) + '</span>' : '<span class="flag">' + esc(t('st.pending')) + '</span>') + '</td></tr>';
+        }).join('') + '</tbody></table></div></div>';
+    }
+    if (an.norms && (an.norms.terms.length || an.norms.simplified.length || an.norms.variants.length)) {
+      h += '<div class="sec"><h3 class="sec-h">' + esc(t('iss.norms')) + '<span class="aside">' + esc(t('iss.norms.aside')) + '</span></h3>';
+      if (an.norms.simplified.length) h += '<p class="fine">' + esc(t('iss.simp', { p: an.norms.simplifiedPct })) + '</p><div class="chips" lang="zh-Hant-TW">' + an.norms.simplified.map(function (x) { return '<span>' + esc(x.c) + '<em>×' + x.n + '</em></span>'; }).join('') + '</div>';
+      if (an.norms.variants.length) h += '<p class="fine">' + esc(t('iss.variants')) + '</p><div class="chips" lang="zh-Hant-TW">' + an.norms.variants.map(function (v) { return '<span>' + esc(v.c) + '→' + esc(v.to) + '<em>×' + v.n + '</em></span>'; }).join('') + '</div>';
+      if (an.norms.terms.length) {
+        h += '<div class="tablewrap"><table><thead><tr><th>' + esc(t('th.term')) + '</th><th>' + esc(t('th.tw')) + '</th><th class="n">' + esc(t('th.n')) + '</th><th>' + esc(t('th.ctx')) + '</th><th>' + esc(t('th.note')) + '</th></tr></thead><tbody>'
+          + an.norms.terms.map(function (tm) {
+            return '<tr><td class="w" lang="zh-Hant-TW">' + esc(tm.form) + '</td><td class="w" lang="zh-Hant-TW">' + esc(tm.tw) + '</td><td class="n">' + tm.n + '</td><td class="ctx" lang="zh-Hant-TW">' + esc(tm.ctx) + '</td><td lang="zh-Hant-TW">' + esc(tm.note) + '</td></tr>';
+          }).join('') + '</tbody></table></div>';
+      }
+      h += '</div>';
+    }
+    if (an.oov.length) {
+      h += '<div class="sec"><h3 class="sec-h">' + esc(t('iss.oov')) + '<span class="aside">' + esc(t('iss.oov.aside')) + '</span></h3><div class="chips" lang="zh-Hant-TW">'
+        + an.oov.map(function (o) { return '<span title="' + esc(o.ctx) + '">' + esc(o.w) + '<em>×' + o.n + '</em></span>'; }).join('') + '</div></div>';
+    }
+    var longList = an.sentences.overLong && an.sentences.overLong.length ? an.sentences.overLong : [];
+    if (longList.length) {
+      h += '<div class="sec"><h3 class="sec-h">' + esc(t('iss.long')) + '<span class="aside">' + esc(t('iss.long.aside')) + '</span></h3><ul class="notes">'
+        + longList.slice(0, 6).map(function (x) { return '<li><span class="num">' + esc(t('iss.len', { n: x.len })) + '</span>　' + zh(esc(x.text)) + '</li>'; }).join('') + '</ul></div>';
+    }
+    return h;
+  }
+
+  function renderReport() {
+    var res = S.last, adjusted = res.action === 'adjust' && res.rounds > 0;
+    var an = adjusted && S.view === 'after' ? res.after : res.before;
+    var h = '';
+    if (adjusted) {
+      h += '<div class="toolbar" role="group" aria-label="' + esc(t('view.aria')) + '">'
+        + '<button type="button" class="btn small ' + (S.view === 'after' ? 'primary' : 'secondary') + '" data-view="after">' + esc(t('view.after')) + '</button>'
+        + '<button type="button" class="btn small ' + (S.view === 'before' ? 'primary' : 'secondary') + '" data-view="before">' + esc(t('view.before')) + '</button></div>';
+    }
+    h += kpis(an, res.target);
+    if (an.meta.lexiconLoaded) {
+      h += '<div class="charts"><div class="sec"><h3 class="sec-h">' + esc(t('chart.curve')) + '<span class="aside">' + esc(t('chart.curve.aside')) + '</span></h3>' + curveSvg(an, res.target) + '</div>'
+        + '<div class="sec"><h3 class="sec-h">' + esc(t('chart.dist')) + '<span class="aside">' + esc(t('chart.dist.aside')) + '</span></h3>' + distRows(an, res.target) + '</div></div>';
+    }
+    h += '<div class="sec"><h3 class="sec-h">' + esc(t('read.title')) + '<span class="aside">' + esc(t('read.aside')) + '</span></h3>' + legendHtml()
+      + '<div class="reading" id="reading" lang="zh-Hant-TW">' + spansHtml(an, res.target) + '</div></div>';
+    h += issuesHtml(an);
+    $('p-report').innerHTML = h;
+    bindCurve();
+    $('p-report').querySelectorAll('[data-view]').forEach(function (b) {
+      b.addEventListener('click', function () { S.view = b.dataset.view; renderReport(); });
+    });
+    var tl = $('show-tl');
+    if (tl) tl.addEventListener('change', function () { S.showTarget = tl.checked; $('reading').innerHTML = spansHtml(an, res.target); });
+  }
+
+  function cmpRow(name, b, a, betterWhen) {
+    var cls = '';
+    if (betterWhen !== 'none' && typeof b === 'number' && typeof a === 'number' && b !== a) cls = (betterWhen === 'up' ? a > b : a < b) ? 'better' : 'worse';
+    return '<tr><td>' + esc(name) + '</td><td class="n">' + (b === null || b === undefined ? '—' : b) + '</td><td class="arrow">→</td><td class="n ' + cls + '">' + (a === null || a === undefined ? '—' : a) + '</td></tr>';
+  }
+
+  function renderRevised(res) {
+    var b = res.before, a = res.after;
+    var h = '<div class="toolbar"><button type="button" class="btn small primary" id="copy-rev">' + esc(t('rev.copy')) + '</button>'
+      + (S.font !== 'std' && res.rounds > 0 ? '<button type="button" class="btn small secondary" id="copy-ivs">' + esc(t('rev.copyIvs')) + '</button>' : '')
+      + '<button type="button" class="btn small secondary" id="use-rev">' + esc(t('rev.use')) + '</button></div>';
+    if (res.summary) h += '<p class="statement" lang="zh-Hant-TW">' + esc(res.summary) + '</p>';
+    if (res.warnings && res.warnings.length) h += '<ul class="notes" lang="zh-Hant-TW">' + res.warnings.map(function (w) { return '<li class="warn">' + esc(w) + '</li>'; }).join('') + '</ul>';
+    if (res.rounds > 0) {
+      var e = function (an) { return an.estimate.level || (an.estimate.beyond ? '7+' : null); };
+      h += '<div class="sec"><h3 class="sec-h">' + esc(t('rev.cmp')) + '</h3><div class="tablewrap compare"><table><thead><tr><th>' + esc(t('th.metric')) + '</th><th class="n">' + esc(t('th.before')) + '</th><th></th><th class="n">' + esc(t('th.after')) + '</th></tr></thead><tbody>'
+        + (b.meta.lexiconLoaded ? cmpRow(t('cmp.est'), e(b), e(a))
+          + cmpRow(t('cmp.cov'), b.target.effectivePct, a.target.effectivePct, 'up')
+          + cmpRow(t('cmp.within'), b.target.withinPct, a.target.withinPct, 'up')
+          + cmpRow(t('cmp.above'), b.target.aboveUnglossedTypes, a.target.aboveUnglossedTypes) : '')
+        + cmpRow(t('cmp.mean'), b.sentences.mean, a.sentences.mean)
+        + cmpRow(t('cmp.max'), b.sentences.max, a.sentences.max)
+        + cmpRow(t('cmp.han'), b.stats.hanChars, a.stats.hanChars, 'none')
+        + (b.norms ? cmpRow(t('cmp.simp'), b.norms.simplified.length, a.norms.simplified.length) + cmpRow(t('cmp.terms'), b.norms.terms.length, a.norms.terms.length) : '')
+        + '</tbody></table></div></div>';
+      h += '<div class="sec"><h3 class="sec-h">' + esc(t('rev.text')) + '<span class="aside">' + esc(t('rev.text.aside')) + '</span></h3><div class="reading" lang="zh-Hant-TW">' + spansHtml(a, res.target) + '</div></div>';
+    }
+    $('p-revised').innerHTML = h;
+    var cr = $('copy-rev'); if (cr) cr.addEventListener('click', function () { copyText(res.revisedText, cr); });
+    var ci = $('copy-ivs'); if (ci) ci.addEventListener('click', function () { copyText(ivsText(res.after), ci); });
+    var ur = $('use-rev'); if (ur) ur.addEventListener('click', function () { $('text').value = res.revisedText; updateCount(); $('text').focus(); });
+  }
+
+  function renderChanges(res) {
+    if (!res.changes || !res.changes.length) { $('p-changes').innerHTML = '<p class="fine">' + esc(t('chg.none')) + '</p>'; return; }
+    $('p-changes').innerHTML = '<div class="tablewrap"><table><thead><tr><th class="n">#</th><th>' + esc(t('th.round')) + '</th><th>' + esc(t('th.orig')) + '</th><th>' + esc(t('th.rev')) + '</th><th>' + esc(t('th.cat')) + '</th><th>' + esc(t('th.reason')) + '</th></tr></thead><tbody>'
+      + res.changes.map(function (c, i) {
+        return '<tr><td class="n">' + (i + 1) + '</td><td class="n">' + c.round + '</td><td class="orig" lang="zh-Hant-TW">' + esc(c.original) + (c.located ? '' : ' <span class="flag">' + esc(t('chg.unlocated')) + '</span>') + '</td>'
+          + '<td class="rev" lang="zh-Hant-TW">' + esc(c.revised) + '</td><td><span class="cat">' + esc(CAT_KEY[c.category] ? t(CAT_KEY[c.category]) : c.category) + '</span></td><td lang="zh-Hant-TW">' + esc(c.reason) + '</td></tr>';
+      }).join('') + '</tbody></table></div>'
+      + '<p class="fine">' + esc(t('chg.note')) + '</p>';
+  }
+
+  function glossaryRows(res) {
+    if (res.action === 'adjust' && res.rounds > 0) return res.glossary || [];
+    var an = res.before;
+    return an.target ? an.target.above.map(function (a) {
+      return { w: a.w, lv: a.lv, n: a.n, py: a.py, zy: a.zy, pos: '', en: '', source: a.glossed ? '生詞表' : '待處理', reason: '' };
+    }) : [];
+  }
+
+  function renderGlossary(rows, res) {
+    var adjusted = res.action === 'adjust' && res.rounds > 0;
+    if (!rows.length) { $('p-gloss').innerHTML = '<p class="fine">' + esc(t('gl.none', { n: res.target })) + '</p>'; return; }
+    var src = function (g) { return (SRC_KEY[g.source] ? t(SRC_KEY[g.source]) : g.source); };
+    var h = '<div class="toolbar"><button type="button" class="btn small primary" id="copy-gl">' + esc(t('gl.copy')) + '</button>'
+      + '<button type="button" class="btn small secondary" id="add-gl">' + esc(t('gl.add')) + '</button></div>'
+      + '<p class="fine">' + esc(t(adjusted ? 'gl.note.adj' : 'gl.note.an')) + ' ' + esc(t('gl.note.py')) + '</p>'
+      + '<div class="tablewrap"><table><thead><tr><th>' + esc(t('th.word')) + '</th><th>' + esc(t('th.lv')) + '</th><th class="n">' + esc(t('th.n')) + '</th><th>' + esc(t('th.py')) + '</th><th>' + esc(t('th.zy')) + '</th><th>' + esc(t('th.pos')) + '</th><th>' + esc(t('th.en')) + '</th><th>' + esc(t('th.src')) + '</th></tr></thead><tbody>'
+      + rows.map(function (g) {
+        return '<tr><td class="w" lang="zh-Hant-TW">' + esc(g.w) + '</td><td>' + (g.lv ? '<span class="lv above">' + g.lv + '</span>' : '<span class="lv none">' + esc(t('gl.notIn')) + '</span>') + '</td><td class="n">' + g.n + '</td>'
+          + '<td>' + esc(g.py) + '</td><td lang="zh-Hant-TW">' + esc(g.zy) + '</td><td>' + esc(g.pos) + '</td><td lang="en">' + esc(g.en) + '</td><td>' + esc(src(g)) + (g.reason ? '：' + zh(esc(g.reason)) : '') + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+    $('p-gloss').innerHTML = h;
+    $('copy-gl').addEventListener('click', function () {
+      // 複製出去的表格是教材內容，欄名維持中文
+      var tsv = ['詞\tTBCL級\t次數\t漢語拼音\t注音\t詞類\t英譯\t來源']
+        .concat(rows.map(function (g) { return [g.w, g.lv || '', g.n, g.py, g.zy, g.pos, g.en, g.source + (g.reason ? '：' + g.reason : '')].join('\t'); }));
+      copyText(tsv.join('\n'), $('copy-gl'));
+    });
+    $('add-gl').addEventListener('click', function () {
+      var have = $('glossary').value.trim();
+      var add = rows.map(function (g) { return g.w; }).filter(function (w) { return have.split(/[\n、,，\s]+/).indexOf(w) < 0; });
+      $('glossary').value = (have ? have + '\n' : '') + add.join('\n');
+      $('more').open = true;
+      $('glossary').focus();
+    });
+  }
+
+  // 極簡 Markdown 轉 HTML（標題、段落、清單、表格、引言、粗體）
+  function md2html(md) {
+    var lines = String(md || '').split('\n'), out = [], i = 0;
+    var inline = function (s) { return esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>'); };
+    while (i < lines.length) {
+      var ln = lines[i];
+      if (/^#{1,3} /.test(ln)) { var lv = ln.match(/^#+/)[0].length; out.push('<h' + lv + '>' + inline(ln.replace(/^#+ /, '')) + '</h' + lv + '>'); i++; continue; }
+      if (/^\|/.test(ln)) {
+        var rows = [];
+        while (i < lines.length && /^\|/.test(lines[i])) { rows.push(lines[i]); i++; }
+        var cells = function (r) { return r.replace(/^\||\|$/g, '').split('|').map(function (c) { return c.trim(); }); };
+        var head = cells(rows[0]), body = rows.slice(2);
+        out.push('<div class="tablewrap"><table><thead><tr>' + head.map(function (c) { return '<th>' + inline(c) + '</th>'; }).join('') + '</tr></thead><tbody>'
+          + body.map(function (r) { return '<tr>' + cells(r).map(function (c) { return '<td>' + inline(c) + '</td>'; }).join('') + '</tr>'; }).join('') + '</tbody></table></div>');
+        continue;
+      }
+      if (/^- /.test(ln)) {
+        var items = [];
+        while (i < lines.length && /^- /.test(lines[i])) { items.push('<li>' + inline(lines[i].slice(2)) + '</li>'); i++; }
+        out.push('<ul>' + items.join('') + '</ul>'); continue;
+      }
+      if (/^> /.test(ln)) { out.push('<blockquote>' + inline(ln.slice(2)) + '</blockquote>'); i++; continue; }
+      if (!ln.trim()) { i++; continue; }
+      var para = [];
+      while (i < lines.length && lines[i].trim() && !/^(#|\||- |> )/.test(lines[i])) { para.push(inline(lines[i])); i++; }
+      out.push('<p>' + para.join('<br>') + '</p>');
+    }
+    return out.join('');
+  }
+
+  function renderMd(res) {
+    $('p-md').innerHTML = '<div class="toolbar"><button type="button" class="btn small primary" id="copy-md">' + esc(t('md.copy')) + '</button>'
+      + '<span class="fine">' + esc(t('md.note')) + '</span></div>'
+      + '<div class="md" lang="zh-Hant-TW">' + md2html(res.report) + '</div>';
+    $('copy-md').addEventListener('click', function () { copyText(res.report, $('copy-md')); });
+  }
+
+  // --------------------------------------------------------------------------- 分頁
+
+  var TABS = ['t-report', 't-revised', 't-changes', 't-gloss', 't-md'];
+  function selectTab(id, focus) {
+    S.currentTab = id;
+    TABS.forEach(function (x) {
+      var on = x === id, btn = $(x);
+      btn.setAttribute('aria-selected', on);
+      btn.tabIndex = on ? 0 : -1;
+      $(btn.getAttribute('aria-controls')).hidden = !on;
+      if (on && focus) btn.focus();
+    });
+  }
+
+  // --------------------------------------------------------------------------- 啟動
+
+  function bind() {
+    $('level').addEventListener('input', function () { setStop(+$('level').value, true); });
+    $('level').addEventListener('change', function () { setStop(+$('level').value); });
+    document.querySelector('.ruler').addEventListener('click', function (e) {
+      var x = e.target.closest('.tk');
+      if (x) { setStop(+x.dataset.stop); $('level').focus(); }
+    });
+    $('text').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
+    });
+    $('ui-lang').addEventListener('change', function () { store('gr-lang', $('ui-lang').value); setLang($('ui-lang').value, true); });
+    $('read-font').addEventListener('change', function () { setFont($('read-font').value); });
+    $('read-size').addEventListener('click', function (e) { var b = e.target.closest('button'); if (b) setSize(b.dataset.size); });
+    $('purpose').addEventListener('change', function () {
+      var pp = document.querySelector('input[name="purpose"]:checked');
+      S.purpose = pp ? pp.value : 'extensive';
+      if (S.last && S.last.action === 'analyze') doAnalyze();
+    });
+    $('text').addEventListener('input', updateCount);
+    $('btn-sample').addEventListener('click', function () {
+      $('text').value = SAMPLE; $('protected').value = SAMPLE_PROTECTED; updateCount(); doAnalyze();
+    });
+    $('btn-clear').addEventListener('click', function () {
+      $('text').value = ''; $('protected').value = ''; updateCount(); $('text').focus();
+    });
+    $('btn-analyze').addEventListener('click', doAnalyze);
+    $('btn-adjust').addEventListener('click', send);
+    TABS.forEach(function (x, i) {
+      $(x).addEventListener('click', function () { if (!$(x).disabled) selectTab(x); });
+      $(x).addEventListener('keydown', function (e) {
+        var d = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+        if (!d) return;
+        var j = i;
+        do { j = (j + d + TABS.length) % TABS.length; } while ($(TABS[j]).disabled && j !== i);
+        selectTab(TABS[j], true);
+      });
+    });
+  }
+
+  function start() {
+    var prefs = window.GR_URL_PREFS || {};
+    renderLangs();
+    bind();
+    setLang(pickLang(''), false);
+    setSize(prefs.size || store('gr-size') || 'm');
+    if (window.GR_PREVIEW) {
+      $('preview-note').hidden = false;
+      $('preview-note').textContent = window.GR_PREVIEW.note;
+    }
+    call('uiBootstrap').then(function (b) {
+      if (!b || !b.ok) { showError(b && b.error || t('err.init')); return; }
+      S.levels = b.levels; S.purposes = b.purposes; S.learners = b.learners; S.status = b.status;
+      if (b.ui) {
+        OVR = b.ui.i18n || {};
+        S.fonts = b.ui.fonts || S.fonts;
+        if (!(prefs.lang || store('gr-lang')) && b.ui.defaultLang) LANG = pickLang(b.ui.defaultLang);
+      }
+      var saved = prefs.level || parseInt(store('gr-target') || '', 10);
+      S.target = saved >= 1 && saved <= 7 ? saved : 3;
+      var savedStop = parseInt(store('gr-stop') || '', 10);
+      if (!prefs.level && savedStop >= 0 && savedStop <= 7 && STOPS[savedStop].tbcl === S.target) S.stop = savedStop;
+      setLang(LANG, false);
+      renderLevels(); renderPurpose(); renderLearners(); renderStatus(b.status);
+      setTarget(S.target, true);
+      setFont(prefs.font || store('gr-font') || 'std');
+      // 輸入欄一律從空白開始，讓學習者自己輸入；不保留上一位使用者的文本
+      $('text').value = ''; $('protected').value = '';
+      updateCount();
+    }, function (e) { showError(e.message); });
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
+})();
+</script>

@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW" data-theme="light" data-font="std" data-size="m">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>分級讀本調級機器人</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@400;600&display=swap">
+<?!= include_('Styles') ?>
+<script>window.GR_URL_PREFS = <?!= prefsJson ?>;</script>
+</head>
+<body>
+<div class="app">
+
+  <header class="bar">
+    <h1 class="title" data-i18n="app.title">分級讀本調級機器人</h1>
+    <div class="status" id="status" aria-live="polite"></div>
+    <details class="gear" id="gear">
+      <summary data-i18n-aria="set.title">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.4 2.9a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.5 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.4 7.4 0 0 0 1.7 1L11 21h4l.4-2.9a7.4 7.4 0 0 0 1.7-1l2.5 1 2-3.5zM13 15.5A3.5 3.5 0 1 1 13 8.5a3.5 3.5 0 0 1 0 7z"/></svg>
+        <span data-i18n="set.title">顯示設定</span>
+      </summary>
+      <div class="gear-panel">
+        <label class="set" for="ui-lang"><span class="set-k" data-i18n="set.lang">介面語言</span><select id="ui-lang"></select></label>
+        <label class="set" for="read-font">
+          <span class="set-k" data-i18n="set.font">閱讀字體</span>
+          <select id="read-font">
+            <option value="std" data-i18n="font.std">標準明體</option>
+            <option value="pinyin" data-i18n="font.pinyin">ToneOZ 繁體＋漢語拼音</option>
+            <option value="zhuyin" data-i18n="font.zhuyin">ToneOZ 繁體＋注音</option>
+          </select>
+        </label>
+        <div class="set" role="group" aria-labelledby="size-k">
+          <span class="set-k" id="size-k" data-i18n="set.size">字級</span>
+          <div class="seg" id="read-size">
+            <button type="button" data-size="s" aria-pressed="false"><span data-i18n="size.s">小</span></button>
+            <button type="button" data-size="m" aria-pressed="true"><span data-i18n="size.m">中</span></button>
+            <button type="button" data-size="l" aria-pressed="false"><span data-i18n="size.l">大</span></button>
+          </div>
+        </div>
+        <p class="set-note" id="out-note"><span class="tag-zh">中文</span><span data-i18n="out.note">介面語言只改變按鈕與說明；分析結果、修訂稿與報告一律以臺灣正體中文輸出。</span></p>
+      </div>
+    </details>
+  </header>
+
+  <p class="font-note" id="font-note" aria-live="polite" hidden></p>
+  <div class="preview-note" id="preview-note" hidden></div>
+
+  <section class="card level-card" aria-labelledby="lvl-eyebrow">
+    <div class="lc-head">
+      <label class="eyebrow" id="lvl-eyebrow" for="level" data-i18n="level.choose">選擇目標等級</label>
+      <span class="badge" id="lvl-badge"></span>
+    </div>
+    <div class="ruler">
+      <div class="ticks codes" id="tk-code"></div>
+      <input type="range" id="level" min="0" max="7" step="1" value="3">
+      <div class="ticks nums" id="tk-num" aria-hidden="true"></div>
+    </div>
+    <p class="lvl-meta num" id="lvl-meta"></p>
+  </section>
+
+  <section class="composer" aria-label="text">
+    <div class="compose-box">
+      <textarea id="text" spellcheck="false" lang="zh-Hant-TW" rows="6" data-i18n-ph="text.placeholder"></textarea>
+      <button type="button" class="send" id="btn-adjust">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3.4 20.4 21 12 3.4 3.6 3.3 10l12.6 2-12.6 2z"/></svg>
+      </button>
+    </div>
+    <div class="compose-foot">
+      <button type="button" class="link" id="btn-sample" data-i18n="btn.sample">載入範例</button>
+      <button type="button" class="link" id="btn-clear" data-i18n="btn.clear">清除</button>
+      <button type="button" class="link" id="btn-analyze" data-i18n="btn.analyze">分析等級</button>
+      <span class="count num" id="count"></span>
+    </div>
+    <div class="error" id="error" role="alert" hidden></div>
+    <p class="fine" id="adjust-hint"></p>
+
+    <details class="more" id="more">
+      <summary data-i18n="more.summary">進階設定：保留詞、已學詞、生詞表、補充指示</summary>
+      <div class="row2">
+        <label class="field" for="mode">
+          <span class="label" data-i18n="mode.label">調整方式</span>
+          <select id="mode">
+            <option value="auto" data-i18n="mode.auto">自動判斷升降級</option>
+            <option value="down" data-i18n="mode.down">降級</option>
+            <option value="up" data-i18n="mode.up">升級</option>
+            <option value="localize" data-i18n="mode.localize">在地化＋調級</option>
+          </select>
+        </label>
+        <label class="field" for="learner">
+          <span class="label" data-i18n="learner.label">學習者</span>
+          <select id="learner"></select>
+        </label>
+      </div>
+      <fieldset class="field purpose" id="purpose"><legend class="label" data-i18n="purpose.legend">用途（決定覆蓋率門檻）</legend></fieldset>
+      <label class="field" for="protected">
+        <span class="label" data-i18n="protected.label">不得更動的詞</span>
+        <span class="hint" data-i18n="protected.hint">人名、地名、店名、主題詞；一行一個或用頓號分隔。</span>
+        <textarea id="protected" rows="2" lang="zh-Hant-TW" placeholder="安娜、小美、士林夜市"></textarea>
+      </label>
+      <label class="field" for="known">
+        <span class="label" data-i18n="known.label">學習者已學的詞</span>
+        <textarea id="known" rows="2" lang="zh-Hant-TW"></textarea>
+      </label>
+      <label class="field" for="glossary">
+        <span class="label" data-i18n="glossary.label">本書生詞表</span>
+        <textarea id="glossary" rows="2" lang="zh-Hant-TW"></textarea>
+      </label>
+      <label class="field" for="notes">
+        <span class="label" data-i18n="notes.label">給 AI 的補充指示</span>
+        <textarea id="notes" rows="2" data-i18n-ph="notes.ph"></textarea>
+      </label>
+      <label class="check" for="strip"><input type="checkbox" id="strip" checked> <span data-i18n="strip.label">對話體：先移除行首說話者標籤再計算</span></label>
+    </details>
+  </section>
+
+  <section class="card result-pane" id="result-pane" aria-labelledby="out-h" aria-busy="false" hidden>
+    <h2 class="sr-only" id="out-h" data-i18n="pane.result">批改結果</h2>
+    <div id="result" hidden>
+      <div class="verdict" id="verdict"></div>
+      <div class="tabs" role="tablist" data-i18n-aria="tabs.aria">
+        <button type="button" class="tab" role="tab" id="t-report" aria-controls="p-report" aria-selected="true"><span data-i18n="tab.report">等級報告</span></button>
+        <button type="button" class="tab" role="tab" id="t-revised" aria-controls="p-revised" aria-selected="false" disabled><span data-i18n="tab.revised">修訂稿</span></button>
+        <button type="button" class="tab" role="tab" id="t-changes" aria-controls="p-changes" aria-selected="false" disabled><span data-i18n="tab.changes">修訂紀錄</span><span class="n" id="n-changes"></span></button>
+        <button type="button" class="tab" role="tab" id="t-gloss" aria-controls="p-gloss" aria-selected="false"><span data-i18n="tab.gloss">生詞表</span><span class="n" id="n-gloss"></span></button>
+        <button type="button" class="tab" role="tab" id="t-md" aria-controls="p-md" aria-selected="false"><span data-i18n="tab.md">編修報告</span></button>
+      </div>
+      <div class="tabpanel" role="tabpanel" id="p-report" aria-labelledby="t-report"></div>
+      <div class="tabpanel" role="tabpanel" id="p-revised" aria-labelledby="t-revised" hidden></div>
+      <div class="tabpanel" role="tabpanel" id="p-changes" aria-labelledby="t-changes" hidden></div>
+      <div class="tabpanel" role="tabpanel" id="p-gloss" aria-labelledby="t-gloss" hidden></div>
+      <div class="tabpanel" role="tabpanel" id="p-md" aria-labelledby="t-md" hidden></div>
+    </div>
+    <div class="busy" id="busy" hidden>
+      <div class="busy-card">
+        <span class="spinner" aria-hidden="true"></span>
+        <p id="busy-text"></p>
+        <p class="fine num" id="busy-time"></p>
+      </div>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <span data-i18n="foot.basis">分級依據：國家教育研究院〈臺灣華語文能力基準〉（TBCL）；TOCFL 為整體對應。</span>
+    <span>v<span id="ver">1.3.0</span>｜<a href="https://coct.naer.edu.tw/" target="_blank" rel="noopener">TBCL</a>｜<a href="https://tocfl.edu.tw/" target="_blank" rel="noopener">TOCFL</a>｜<a href="https://toneoz.com/blog/download-fonts/" target="_blank" rel="noopener">ToneOZ</a></span>
+  </footer>
+</div>
+<?!= include_('I18n') ?>
+<?!= include_('Client') ?>
+</body>
+</html>
